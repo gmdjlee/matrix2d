@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "matrix2d",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["run_app.py"],
+      "port": 8050
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+import numpy as np
+import pytest
+
+from matrix2d.core.parser import load_matrix
+from matrix2d.services.repository import load_data, save_matrix, scan_folder
+
+
+def _write(p, text):
+    p.write_text(text)
+
+
+def test_scan_folder_sorted_and_parsed(tmp_path):
+    (tmp_path / "A_PT0002_000100s(240C).dat").write_text("1,2\n3,4\n")
+    (tmp_path / "A_PT0001_000060s(240C).csv").write_text("1,2\n3,4\n")
+    (tmp_path / "A_PT0001_000011s(25C).txt").write_text("1,2\n3,4\n")
+    metas = scan_folder(str(tmp_path), "TOP")
+    # Sorted by (sample_no, time_s).
+    assert [(m.sample_no, m.time_s) for m in metas] == [(1, 11), (1, 60), (2, 100)]
+    assert all(m.kind == "TOP" for m in metas)
+
+
+def test_scan_folder_skips_unparseable(tmp_path, caplog):
+    (tmp_path / "good_PT0001_000011s(25C).dat").write_text("1\n")
+    (tmp_path / "bad_name.dat").write_text("1\n")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        metas = scan_folder(str(tmp_path), "BTM")
+    assert len(metas) == 1
+    assert metas[0].sample_no == 1
+
+
+def test_scan_folder_all_extensions(tmp_path):
+    (tmp_path / "A_PT0001_000011s(25C).dat").write_text("1\n")
+    (tmp_path / "A_PT0002_000011s(25C).csv").write_text("1\n")
+    (tmp_path / "A_PT0003_000011s(25C).txt").write_text("1\n")
+    metas = scan_folder(str(tmp_path), "TOP")
+    assert len(metas) == 3
+
+
+def test_load_data(tmp_path):
+    p = tmp_path / "A_PT0009_000060s(240C).dat"
+    p.write_text("1.0,2.0\n3.0,4.0\n")
+    metas = scan_folder(str(tmp_path), "TOP")
+    wd = load_data(metas[0])
+    assert wd.meta.sample_no == 9
+    assert wd.values.shape == (2, 2)
+
+
+def test_save_matrix_roundtrip(tmp_path):
+    vals = np.array([[1.25, np.nan], [3.5, 4.0]])
+    out = tmp_path / "out.txt"
+    save_matrix(str(out), vals)
+    loaded = load_matrix(str(out))
+    assert np.isnan(loaded[0, 1])
+    assert loaded[0, 0] == pytest.approx(1.25)
+    assert loaded[1, 1] == pytest.approx(4.0)
+
+
+def test_save_matrix_writes_nan_literal(tmp_path):
+    vals = np.array([[np.nan, 2.0]])
+    out = tmp_path / "out.tsv"
+    save_matrix(str(out), vals)
+    text = out.read_text()
+    assert "nan" in text
+
+
+def test_save_matrix_creates_parent(tmp_path):
+    vals = np.array([[1.0]])
+    out = tmp_path / "nested" / "dir" / "out.txt"
+    save_matrix(str(out), vals)
+    assert out.exists()
+
+
+def test_save_matrix_non_2d_raises(tmp_path):
+    with pytest.raises(ValueError):
+        save_matrix(str(tmp_path / "x.txt"), np.array([1.0, 2.0]))

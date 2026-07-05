@@ -1,0 +1,244 @@
+/* Warpage Analysis - light theme, clean SPA layout */
+
+:root {
+    --bg: #f5f6f8;
+    --panel-bg: #ffffff;
+    --border: #dfe3e8;
+    --text: #23272e;
+    --muted: #6b7280;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --error: #c0392b;
+    --ok: #15803d;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Malgun Gothic", Arial, sans-serif;
+    font-size: 14px;
+}
+
+.app-root {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* ---- sidebar ---- */
+.sidebar {
+    width: 320px;
+    flex: 0 0 320px;
+    background: var(--panel-bg);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+}
+
+.sidebar h1 {
+    font-size: 18px;
+    margin: 0 0 16px;
+    color: var(--primary);
+}
+
+.panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 16px;
+    background: #fbfcfd;
+}
+
+.panel h3 {
+    margin: 0 0 10px;
+    font-size: 14px;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+}
+
+/* ---- fields ---- */
+.field {
+    margin-bottom: 10px;
+}
+
+.field label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+}
+
+.row {
+    display: flex;
+    gap: 8px;
+}
+
+.field.half {
+    flex: 1 1 0;
+}
+
+.input-full {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.checklist label {
+    display: block;
+    color: var(--text);
+    margin-bottom: 2px;
+    font-size: 13px;
+}
+
+/* ---- buttons ---- */
+.btn {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+    margin-top: 6px;
+}
+
+.btn:hover {
+    background: #f0f2f5;
+}
+
+.btn-primary {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+}
+
+.btn-primary:hover {
+    background: var(--primary-hover);
+}
+
+/* ---- main ---- */
+.main {
+    flex: 1 1 auto;
+    padding: 16px 24px;
+    overflow-x: auto;
+}
+
+.tab-body {
+    padding: 16px 4px;
+}
+
+.controls-row {
+    display: flex;
+    gap: 16px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.field.grow {
+    flex: 1 1 300px;
+}
+
+.radio-inline label {
+    display: inline-block;
+    margin-right: 12px;
+    color: var(--text);
+}
+
+.graph {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.graph-pair {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.graph.half {
+    flex: 1 1 360px;
+}
+
+/* ---- status / error ---- */
+.status {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+}
+
+.error {
+    color: var(--error);
+    font-size: 12px;
+    white-space: pre-wrap;
+    margin: 6px 0;
+}
+
+.ok {
+    color: var(--ok);
+    font-weight: 600;
+}
+
+/* ---- offsets (3D) ---- */
+.offsets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.offset-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    background: #fbfcfd;
+}
+
+.offset-label {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.offset-input {
+    width: 80px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+
+/* ---- results table ---- */
+.table-wrap {
+    overflow-x: auto;
+}
+
+.result-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 12px;
+}
+
+.result-table th,
+.result-table td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.result-table th {
+    background: #eef2f7;
+}
