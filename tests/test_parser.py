@@ -6,6 +6,7 @@ from matrix2d.core.parser import (
     load_matrix,
     load_warpage,
     parse_filename,
+    parse_gap_filename,
 )
 from matrix2d.core.models import SampleMeta, WarpageData
 
@@ -82,6 +83,46 @@ def test_parse_path_defaults_to_filename():
 def test_parse_bad_names_raise(bad):
     with pytest.raises(ValueError):
         parse_filename(bad, "TOP")
+
+
+# ---- parse_gap_filename --------------------------------------------------------
+
+def test_parse_gap_basic():
+    m = parse_gap_filename("TOP1-BTM12_H250.txt")
+    assert m.kind == "GAP"
+    assert m.sample_no == 1
+    assert m.btm_no == 12
+    assert m.phase == "H"
+    assert m.temp_c == 250
+    assert m.time_s == 0
+    assert m.title == "TOP1-BTM12_H250"
+
+
+def test_parse_gap_cooling_and_duplicate_suffix():
+    m = parse_gap_filename("TOP12-BTM3_C85_2.dat")
+    assert (m.sample_no, m.btm_no, m.phase, m.temp_c) == (12, 3, "C", 85)
+
+
+def test_parse_gap_with_directory_and_path():
+    m = parse_gap_filename("/x/y/TOP2-BTM4_H240.txt", path="p")
+    assert m.path == "p"
+    assert m.sample_no == 2
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "random.txt",
+        "TOP1_BTM2_H240.txt",       # underscore, not dash
+        "TOP1-BTM2_X240.txt",       # phase not H/C
+        "TOP1-BTM2_H2400.txt",      # temp too many digits
+        "TOP1-BTM2_H.txt",          # missing temp
+        "A_PT0001_000011s(25C).dat",  # measurement format, not gap
+    ],
+)
+def test_parse_gap_bad_names_raise(bad):
+    with pytest.raises(ValueError):
+        parse_gap_filename(bad)
 
 
 # ---- load_matrix -------------------------------------------------------------
@@ -169,3 +210,22 @@ def test_load_warpage(tmp_path):
     assert wd.meta.sample_no == 5
     assert wd.meta.temp_c == 240
     assert wd.values.shape == (2, 2)
+
+
+def test_load_warpage_gap_naming(tmp_path):
+    p = tmp_path / "TOP1-BTM12_H250.txt"
+    p.write_text("1.0\t2.0\n3.0\t4.0\n")
+    wd = load_warpage(str(p), "GAP")
+    assert wd.meta.kind == "GAP"
+    assert wd.meta.sample_no == 1
+    assert wd.meta.btm_no == 12
+    assert wd.meta.phase == "H"
+    assert wd.values.shape == (2, 2)
+
+
+def test_load_warpage_gap_legacy_fallback(tmp_path):
+    p = tmp_path / "G_PT0004_000060s(240C).dat"
+    p.write_text("1.0\n")
+    wd = load_warpage(str(p), "GAP")
+    assert wd.meta.sample_no == 4
+    assert wd.meta.btm_no is None

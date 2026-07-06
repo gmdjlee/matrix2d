@@ -30,6 +30,41 @@ def test_scan_folder_skips_unparseable(tmp_path, caplog):
     assert metas[0].sample_no == 1
 
 
+def test_scan_folder_skips_bad_content(tmp_path, caplog):
+    # valid name but unparseable matrix content -> skipped, not raised
+    (tmp_path / "good_PT0001_000011s(25C).dat").write_text("1,2\n3,4\n")
+    (tmp_path / "bad_PT0002_000011s(25C).dat").write_text("1,abc\n")
+    (tmp_path / "empty_PT0003_000011s(25C).dat").write_text("\n  \n")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        metas = scan_folder(str(tmp_path), "TOP")
+    assert [m.sample_no for m in metas] == [1]
+
+
+def test_scan_gap_folder_gap_naming(tmp_path):
+    (tmp_path / "TOP1-BTM12_H250.txt").write_text("1,2\n3,4\n")
+    (tmp_path / "TOP2-BTM1_C85.txt").write_text("1,2\n3,4\n")
+    metas = scan_folder(str(tmp_path), "GAP")
+    assert len(metas) == 2
+    by_top = {m.sample_no: m for m in metas}
+    assert by_top[1].btm_no == 12
+    assert by_top[1].phase == "H"
+    assert by_top[1].temp_c == 250
+    assert by_top[2].phase == "C"
+    assert all(m.kind == "GAP" for m in metas)
+
+
+def test_scan_gap_folder_legacy_format_fallback(tmp_path):
+    # old measurement-style names still parse in a GAP folder
+    (tmp_path / "G_PT0004_000060s(240C).dat").write_text("1\n")
+    metas = scan_folder(str(tmp_path), "GAP")
+    assert len(metas) == 1
+    assert metas[0].sample_no == 4
+    assert metas[0].btm_no is None
+    assert metas[0].phase is None
+
+
 def test_scan_folder_all_extensions(tmp_path):
     (tmp_path / "A_PT0001_000011s(25C).dat").write_text("1\n")
     (tmp_path / "A_PT0002_000011s(25C).csv").write_text("1\n")

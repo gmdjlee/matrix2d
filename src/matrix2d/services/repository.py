@@ -8,7 +8,7 @@ from typing import List
 import numpy as np
 
 from ..core.models import SampleMeta, WarpageData
-from ..core.parser import load_warpage, parse_filename
+from ..core.parser import load_matrix, load_warpage, parse_data_filename
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,10 @@ _SCAN_EXTS = ("*.dat", "*.csv", "*.txt")
 def scan_folder(folder: str, kind: str) -> "List[SampleMeta]":
     """Scan a folder for parseable measurement files.
 
-    Files matching *.dat/*.csv/*.txt are parsed; unparseable names are skipped
-    with a logged warning. Results are sorted by (sample_no, time_s).
+    Files matching *.dat/*.csv/*.txt are parsed; files whose NAME or CONTENT
+    does not match the expected format are skipped with a logged warning
+    (content is validated by loading the matrix once). Results are sorted by
+    (sample_no, time_s).
 
     Args:
         folder: Directory to scan.
@@ -36,9 +38,11 @@ def scan_folder(folder: str, kind: str) -> "List[SampleMeta]":
     metas: List[SampleMeta] = []
     for path in paths:
         try:
-            metas.append(parse_filename(path, kind, path=path))
-        except ValueError as exc:
-            logger.warning("Skipping unparseable file '%s': %s", path, exc)
+            meta = parse_data_filename(path, kind, path=path)
+            load_matrix(path)  # content validation only; result discarded
+            metas.append(meta)
+        except (ValueError, OSError) as exc:
+            logger.warning("Skipping invalid data file '%s': %s", path, exc)
     metas.sort(key=lambda m: (m.sample_no, m.time_s))
     return metas
 

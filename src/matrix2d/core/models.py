@@ -4,7 +4,7 @@ Pure data containers with no I/O or service dependencies.
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -16,10 +16,15 @@ class SampleMeta:
     Attributes:
         title: Free-form title (letters/digits/spaces).
         sample_no: Sample number (from PTXXXX, leading zeros stripped).
-        time_s: Measurement time in seconds.
+            For GAP files named ``TOP{n}-BTM{m}_...`` this is the TOP number.
+        time_s: Measurement time in seconds (0 for gap-named files, which
+            carry no time).
         temp_c: Temperature in Celsius.
         kind: One of "TOP", "BTM", "GAP".
         path: Source file path (optional).
+        btm_no: BTM sample number for gap-named files, else None.
+        phase: Explicit "H"/"C" phase for gap-named files, else None
+            (phase is then derived from the sample's peak time).
     """
 
     title: str
@@ -28,6 +33,8 @@ class SampleMeta:
     temp_c: int
     kind: str
     path: str = ""
+    btm_no: Optional[int] = None
+    phase: Optional[str] = None
 
 
 @dataclass

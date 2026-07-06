@@ -24,31 +24,31 @@ FONT_FAMILIES = ["Arial", "Times New Roman", "Courier New", "Malgun Gothic"]
 COLORSCALES = ["Jet", "Viridis", "Plasma", "RdBu", "Turbo", "Greys"]
 
 
+def _folder_field(kind: str) -> html.Div:
+    """One folder row: label, path input and a Browse... dialog button."""
+    lower = kind.lower()
+    return html.Div(className="field", children=[
+        html.Label(kind),
+        html.Div(className="row", children=[
+            dcc.Input(id="folder-" + lower, type="text",
+                      value=_demo_default(kind),
+                      placeholder="path to {0} folder".format(kind),
+                      className="input-full grow"),
+            html.Button("Browse...", id="btn-browse-" + lower, n_clicks=0,
+                        className="btn", title="Select {0} folder".format(kind)),
+        ]),
+    ])
+
+
 def _folders_panel() -> html.Div:
     return html.Div(
         className="panel",
         children=[
             html.H3("Folders"),
-            html.Div(className="field", children=[
-                html.Label("TOP"),
-                dcc.Input(id="folder-top", type="text", value=_demo_default("TOP"),
-                          placeholder="path to TOP folder", className="input-full"),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("BTM"),
-                dcc.Input(id="folder-btm", type="text", value=_demo_default("BTM"),
-                          placeholder="path to BTM folder", className="input-full"),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("GAP"),
-                dcc.Input(id="folder-gap", type="text", value=_demo_default("GAP"),
-                          placeholder="path to GAP folder", className="input-full"),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("OUT"),
-                dcc.Input(id="folder-out", type="text", value=_demo_default("OUT"),
-                          placeholder="path to OUT folder", className="input-full"),
-            ]),
+            _folder_field("TOP"),
+            _folder_field("BTM"),
+            _folder_field("GAP"),
+            _folder_field("OUT"),
             html.Button("Scan", id="btn-scan", n_clicks=0, className="btn btn-primary"),
             html.Div(id="scan-status", className="status"),
         ],
@@ -104,6 +104,25 @@ def _data_options_panel() -> html.Div:
             ]),
             html.Div("Zero cell coordinates apply after flip/rotate.",
                      className="status"),
+            html.Div(className="field", children=[
+                html.Label("Reference size (resize target)"),
+                dcc.RadioItems(id="gap-reference",
+                               options=[{"label": " Auto (smaller → larger)",
+                                         "value": "AUTO"},
+                                        {"label": " TOP", "value": "TOP"},
+                                        {"label": " BTM", "value": "BTM"}],
+                               value="AUTO", className="radio-inline"),
+            ]),
+            html.Div(className="field", children=[
+                html.Label("Display data (2D/3D view)"),
+                dcc.RadioItems(id="data-show-resized",
+                               options=[{"label": " Original", "value": "original"},
+                                        {"label": " Resized", "value": "resized"}],
+                               value="original", className="radio-inline"),
+            ]),
+            html.Div("Resized preview mirrors the gap pipeline: the "
+                     "non-reference dataset is interpolated onto the "
+                     "reference grid.", className="status"),
         ],
     )
 
@@ -251,15 +270,8 @@ def _tab_3d() -> html.Div:
 def _tab_gap() -> html.Div:
     return html.Div(className="tab-body", children=[
         html.Div(className="controls-row", children=[
-            html.Div(className="field", children=[
-                html.Label("Reference size"),
-                dcc.RadioItems(id="gap-reference",
-                               options=[{"label": " Auto (smaller → larger)",
-                                         "value": "AUTO"},
-                                        {"label": " TOP", "value": "TOP"},
-                                        {"label": " BTM", "value": "BTM"}],
-                               value="AUTO", className="radio-inline"),
-            ]),
+            html.Div("Reference size is set in Data Options (sidebar).",
+                     className="status"),
             html.Button("Compute All Gaps", id="btn-compute-gaps",
                         n_clicks=0, className="btn btn-primary"),
         ]),

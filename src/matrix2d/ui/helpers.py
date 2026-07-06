@@ -20,7 +20,8 @@ from matrix2d.core.transform import TransformConfig, apply_transform
 # plain JSON-serializable dicts for dcc.Store).
 # ---------------------------------------------------------------------------
 
-_META_FIELDS = ("title", "sample_no", "time_s", "temp_c", "kind", "path")
+_META_FIELDS = ("title", "sample_no", "time_s", "temp_c", "kind", "path",
+                "btm_no", "phase")
 
 
 def meta_to_dict(meta: SampleMeta) -> dict:
@@ -35,11 +36,20 @@ def meta_from_dict(d: dict) -> SampleMeta:
         temp_c=d["temp_c"],
         kind=d["kind"],
         path=d["path"],
+        btm_no=d.get("btm_no"),   # .get: dicts stored before the field existed
+        phase=d.get("phase"),
     )
 
 
 def meta_label(meta: SampleMeta) -> str:
-    """Human-readable dropdown label, e.g. ``TOP PT0002 240C 192s``."""
+    """Human-readable dropdown label, e.g. ``TOP PT0002 240C 192s``.
+
+    Gap-named files render as ``GAP TOP1-BTM12 H250C``.
+    """
+    if meta.kind == "GAP" and meta.btm_no is not None:
+        return "GAP TOP{top}-BTM{btm} {phase}{temp}C".format(
+            top=meta.sample_no, btm=meta.btm_no,
+            phase=meta.phase or "", temp=meta.temp_c)
     return "{kind} PT{sample:04d} {temp}C {time}s".format(
         kind=meta.kind,
         sample=meta.sample_no,
@@ -49,6 +59,10 @@ def meta_label(meta: SampleMeta) -> str:
 
 
 def meta_label_from_dict(d: dict) -> str:
+    if d.get("kind") == "GAP" and d.get("btm_no") is not None:
+        return "GAP TOP{top}-BTM{btm} {phase}{temp}C".format(
+            top=d.get("sample_no", "?"), btm=d.get("btm_no"),
+            phase=d.get("phase") or "", temp=d.get("temp_c", "?"))
     try:
         sample = "PT{0:04d}".format(int(d.get("sample_no")))
     except (TypeError, ValueError):
@@ -69,8 +83,10 @@ def meta_label_from_dict(d: dict) -> str:
 def phase_entries(meta_dicts: "List[dict]") -> "List[dict]":
     """Assign an H/C phase to every meta dict, per sample.
 
-    Groups the dicts by sample_no, finds each sample's peak time (time of max
-    temperature) and tags each measurement ``H`` (time <= peak) or ``C``.
+    Dicts with an explicit ``phase`` ("H"/"C", set by gap-named files) keep
+    it as-is. The rest are grouped by sample_no; each sample's peak time
+    (time of max temperature) tags each measurement ``H`` (time <= peak)
+    or ``C``.
 
     Returns a list of ``{"phase", "temp_c", "time_s", "sample_no", "meta"}``
     dicts, in the same order as the input. Dicts that fail to convert are
@@ -78,6 +94,8 @@ def phase_entries(meta_dicts: "List[dict]") -> "List[dict]":
     """
     by_sample = {}  # type: Dict[int, List[dict]]
     for d in meta_dicts:
+        if d.get("phase") in ("H", "C"):
+            continue  # explicit phase: peak-time derivation not needed
         try:
             by_sample.setdefault(int(d["sample_no"]), []).append(d)
         except (KeyError, TypeError, ValueError):
@@ -102,10 +120,12 @@ def phase_entries(meta_dicts: "List[dict]") -> "List[dict]":
             sample_no = int(d["sample_no"])
             time_s = int(d["time_s"])
             temp_c = int(d["temp_c"])
-            peak = peak_by_sample[sample_no]
+            if d.get("phase") in ("H", "C"):
+                phase = d["phase"]
+            else:
+                phase = naming.assign_phase(time_s, peak_by_sample[sample_no])
         except (KeyError, TypeError, ValueError):
             continue
-        phase = naming.assign_phase(time_s, peak)
         entries.append({
             "phase": phase,
             "temp_c": temp_c,

@@ -22,6 +22,7 @@ import numpy as np
 from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.ui import charts, helpers
+from matrix2d.ui.dialogs import pick_folder
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +225,15 @@ def _entry_for(meta_dicts: List[dict], sample_no, phase_temp: str) -> Optional[d
 
 
 def _phase_label(entry: dict) -> str:
-    """Dropdown label with the phase folded in, e.g. 'TOP PT0001 H240C 192s'."""
+    """Dropdown label with the phase folded in, e.g. 'TOP PT0001 H240C 192s'.
+
+    Gap-named files render as 'GAP TOP1-BTM12 H250C'.
+    """
     meta = entry["meta"]
+    if meta.get("kind") == "GAP" and meta.get("btm_no") is not None:
+        return "GAP TOP{top}-BTM{btm} {phase}{temp}C".format(
+            top=meta.get("sample_no", "?"), btm=meta.get("btm_no"),
+            phase=entry["phase"], temp=entry["temp_c"])
     try:
         sample = "PT{0:04d}".format(int(meta.get("sample_no")))
     except (TypeError, ValueError):
@@ -239,7 +247,66 @@ def _phase_label(entry: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Resize-preview helpers: mirror the pipeline's reference/resize rules so the
+# 2D/3D views can show data exactly as the gap computation will consume it.
+# ---------------------------------------------------------------------------
+
+def _resize_pair(top_vals, btm_vals, reference):
+    """Resize the non-reference side of a TOP/BTM pair to the reference grid.
+
+    Same rules as run_pipeline: AUTO picks the larger element count (tie ->
+    TOP); the reference dataset's blank mask is authoritative.
+
+    Returns (top_vals, btm_vals, error_message).
+    """
+    from matrix2d.core.resize import resize_to_reference
+
+    ref = reference if reference in ("TOP", "BTM") else (
+        "TOP" if top_vals.size >= btm_vals.size else "BTM")
+    try:
+        if ref == "TOP":
+            btm_vals = resize_to_reference(btm_vals, top_vals,
+                                           mask_mode="reference")
+        else:
+            top_vals = resize_to_reference(top_vals, btm_vals,
+                                           mask_mode="reference")
+    except ValueError as exc:
+        return top_vals, btm_vals, "Resize failed: {0}".format(exc)
+    return top_vals, btm_vals, ""
+
+
+def _pick_reference_record(records, reference):
+    """Choose the reference dataset among 3D-selected TOP/BTM records.
+
+    Explicit TOP/BTM restricts the pool to that kind (falls back to all
+    input records when the kind is not selected); AUTO uses every input
+    record. Largest element count wins, ties prefer TOP.
+    """
+    pool = records
+    if reference in ("TOP", "BTM"):
+        of_kind = [r for r in records if r["kind"] == reference]
+        if of_kind:
+            pool = of_kind
+    return max(pool, key=lambda r: (r["values"].size, r["kind"] == "TOP"))
+
+
 def register_callbacks(app):
+    # -------------------------------------------------------------------
+    # 0. Folder Browse... buttons -> native directory dialog. One callback
+    #    per folder input; cancel / headless -> no_update.
+    # -------------------------------------------------------------------
+    for _kind in ("top", "btm", "gap", "out"):
+        @app.callback(
+            Output("folder-{0}".format(_kind), "value"),
+            Input("btn-browse-{0}".format(_kind), "n_clicks"),
+            State("folder-{0}".format(_kind), "value"),
+            prevent_initial_call=True,
+        )
+        def browse_folder(_n, current, _kind=_kind):  # bind loop var
+            path = pick_folder(current or "")
+            return path if path else no_update
+
     # -------------------------------------------------------------------
     # 1. Scan folders -> store metas, show counts. Dropdown options are
     #    derived reactively from the store by the callbacks below.
@@ -265,6 +332,11 @@ def register_callbacks(app):
             try:
                 metas = scan_folder(folder, kind)
                 result[kind] = [helpers.meta_to_dict(m) for m in metas]
+                if not metas:
+                    # invalid-format files are skipped during scan, so an
+                    # empty result means the folder holds no usable data.
+                    errors.append(
+                        "{0}: 데이터 없음 (no valid data files)".format(kind))
             except Exception as exc:  # noqa: BLE001 - surface any core error
                 errors.append("{kind}: {exc}".format(kind=kind, exc=exc))
 
@@ -334,12 +406,15 @@ def register_callbacks(app):
         [Input("view2d-top-sample", "value"),
          Input("view2d-btm-sample", "value"),
          Input("view2d-temp", "value"),
-         Input("view2d-type", "value")]
+         Input("view2d-type", "value"),
+         Input("data-show-resized", "value"),
+         Input("gap-reference", "value")]
         + _OPTION_INPUTS + _TRANSFORM_INPUTS,
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def render_2d(top_sample, btm_sample, phase_temp, chart_type, *rest):
+    def render_2d(top_sample, btm_sample, phase_temp, chart_type,
+                  show_resized, reference, *rest):
         option_values = rest[:len(_OPTION_STATES)]
         transform_values = rest[len(_OPTION_STATES):-1]
         store_metas = rest[-1]
@@ -350,29 +425,46 @@ def register_callbacks(app):
             opts = _build_options(*option_values)
             top_cfg, btm_cfg = _transform_configs(transform_values)
 
-            def _side_fig(kind, sample_no):
+            def _side_values(kind, sample_no):
+                """(values, entry, message): values None -> show message."""
                 if sample_no is None:
-                    return _empty_fig("Select a {0} sample".format(kind))
+                    return None, None, "Select a {0} sample".format(kind)
                 if not phase_temp:
-                    return _empty_fig("Select a temperature")
+                    return None, None, "Select a temperature"
                 entry = _entry_for(_kind_metas(store_metas, kind),
                                    sample_no, phase_temp)
                 if entry is None:
-                    return _empty_fig("No {0} file at {1}".format(kind, phase_temp))
+                    return None, None, \
+                        "No {0} file at {1}".format(kind, phase_temp)
                 cfg = _config_for_kind(kind, top_cfg, btm_cfg)
                 try:
                     values = helpers.transformed_matrix(entry["meta"], cfg)
-                except ValueError as exc:  # e.g. zero cell out of bounds / blank
-                    return _empty_fig("{0}: {1}".format(kind, exc))
+                except ValueError as exc:  # zero cell out of bounds / blank
+                    return None, entry, "{0}: {1}".format(kind, exc)
+                return values, entry, None
+
+            top_vals, top_entry, top_msg = _side_values("TOP", top_sample)
+            btm_vals, btm_entry, btm_msg = _side_values("BTM", btm_sample)
+
+            # Optional resize preview: only meaningful with both sides loaded.
+            resize_err = ""
+            if show_resized == "resized" \
+                    and top_vals is not None and btm_vals is not None:
+                top_vals, btm_vals, resize_err = _resize_pair(
+                    top_vals, btm_vals, reference)
+
+            def _side_fig(values, entry, msg):
+                if values is None:
+                    return _empty_fig(msg or "")
                 side_opts = dataclasses.replace(
                     opts, title=opts.title or _phase_label(entry))
                 if chart_type == "heatmap":
                     return charts.heatmap_2d(values, side_opts)
                 return charts.contour_2d(values, side_opts)
 
-            fig_top = _side_fig("TOP", top_sample)
-            fig_btm = _side_fig("BTM", btm_sample)
-            return fig_top, fig_btm, ""
+            fig_top = _side_fig(top_vals, top_entry, top_msg)
+            fig_btm = _side_fig(btm_vals, btm_entry, btm_msg)
+            return fig_top, fig_btm, resize_err
         except Exception:  # noqa: BLE001
             return (_empty_fig(), _empty_fig(),
                     "Render error: " + traceback.format_exc(limit=2))
@@ -400,6 +492,11 @@ def register_callbacks(app):
                 temps.add(int(d["temp_c"]))
             except (KeyError, TypeError, ValueError):
                 continue
+            try:  # gap-named files carry a second (BTM) sample number
+                if d.get("btm_no") is not None:
+                    samples.add(int(d["btm_no"]))
+            except (TypeError, ValueError):
+                pass
         for s in store_gaps or []:
             parsed = helpers.parse_gap_name(s.get("out_name", ""))
             if parsed:
@@ -435,10 +532,21 @@ def register_callbacks(app):
         f_samples = set(f_samples or [])
         f_temps = set(f_temps or [])
 
+        def _matches_sample(e):
+            if not f_samples:
+                return True
+            if e["sample_no"] in f_samples:
+                return True
+            btm = e["meta"].get("btm_no")  # gap-named files match either no.
+            try:
+                return btm is not None and int(btm) in f_samples
+            except (TypeError, ValueError):
+                return False
+
         def _meta_opts(kind):
             opts = []
             for e in helpers.phase_entries(_kind_metas(store_metas, kind)):
-                if f_samples and e["sample_no"] not in f_samples:
+                if not _matches_sample(e):
                     continue
                 if f_temps and e["temp_c"] not in f_temps:
                     continue
@@ -511,6 +619,8 @@ def register_callbacks(app):
         [Input("view3d-top", "value"),
          Input("view3d-btm", "value"),
          Input("view3d-gap", "value"),
+         Input("data-show-resized", "value"),
+         Input("gap-reference", "value"),
          Input("store-gaps", "data"),  # recompute -> re-render gap surfaces
          Input({"type": "z-offset", "key": ALL}, "value"),
          Input({"type": "z-offset", "key": ALL}, "id")]
@@ -518,13 +628,14 @@ def register_callbacks(app):
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def render_3d(top_keys, btm_keys, gap_keys, _store_gaps,
-                  offset_values, offset_ids, *rest):
+    def render_3d(top_keys, btm_keys, gap_keys, show_resized, reference,
+                  _store_gaps, offset_values, offset_ids, *rest):
         option_values = rest[:len(_OPTION_STATES)]
         transform_values = rest[len(_OPTION_STATES):-1]
         store_metas = rest[-1]
-        selected_keys = (top_keys or []) + (btm_keys or []) + (gap_keys or [])
-        if not selected_keys:
+        selections = [("TOP", top_keys or []), ("BTM", btm_keys or []),
+                      ("GAP", gap_keys or [])]
+        if not any(keys for _k, keys in selections):
             return _empty_fig("Select datasets"), ""
         try:
             # map key -> offset from the pattern-matched inputs
@@ -535,31 +646,58 @@ def register_callbacks(app):
             opts = _build_options(*option_values)
             top_cfg, btm_cfg = _transform_configs(transform_values)
 
+            records = []
+            problems = []
+            for kind, keys in selections:
+                for key in keys:
+                    try:
+                        values = _resolve_values(key, store_metas,
+                                                 top_cfg, btm_cfg)
+                    except ValueError as exc:  # zero cell out of bounds/blank
+                        problems.append("{0} ({1})".format(
+                            _key_label(key, store_metas), exc))
+                        continue
+                    if values is None:
+                        problems.append(key)
+                        continue
+                    records.append({"key": key, "kind": kind,
+                                    "values": values})
+            if not records:
+                return _empty_fig(), "No loadable datasets selected."
+
+            # Optional resize preview: bring every selected TOP/BTM dataset
+            # onto one reference grid (GAP surfaces are shown as-is).
+            if show_resized == "resized":
+                from matrix2d.core.resize import resize_to_reference
+
+                inputs = [r for r in records if r["kind"] in ("TOP", "BTM")]
+                if len(inputs) >= 2:
+                    ref = _pick_reference_record(inputs, reference)
+                    for r in inputs:
+                        if r is ref:
+                            continue
+                        try:
+                            r["values"] = resize_to_reference(
+                                r["values"], ref["values"],
+                                mask_mode="reference")
+                        except ValueError as exc:
+                            problems.append("{0} (resize: {1})".format(
+                                _key_label(r["key"], store_metas), exc))
+
             items = []
-            missing = []
-            for key in selected_keys:
-                try:
-                    values = _resolve_values(key, store_metas, top_cfg, btm_cfg)
-                except ValueError as exc:  # zero cell out of bounds / blank
-                    missing.append("{0} ({1})".format(
-                        _key_label(key, store_metas), exc))
-                    continue
-                if values is None:
-                    missing.append(key)
-                    continue
-                label = _key_label(key, store_metas)
+            for r in records:
+                label = _key_label(r["key"], store_metas)
                 if opts.show_shape:
                     # multi_surface_3d takes prebuilt names, so the shape
                     # suffix is folded into the label here.
                     label = "{0} ({1}×{2})".format(
-                        label, values.shape[0], values.shape[1])
-                items.append((label, values, offset_map.get(key, 0.0)))
-            if not items:
-                return _empty_fig(), "No loadable datasets selected."
+                        label, r["values"].shape[0], r["values"].shape[1])
+                items.append((label, r["values"],
+                              offset_map.get(r["key"], 0.0)))
             fig = charts.multi_surface_3d(items, opts)
             err = ""
-            if missing:
-                err = "Skipped (not loaded): " + ", ".join(missing)
+            if problems:
+                err = "Skipped / degraded: " + ", ".join(problems)
             return fig, err
         except Exception:  # noqa: BLE001
             return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)

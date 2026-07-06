@@ -43,9 +43,17 @@ charts.py stays Dash-free so it ports directly to the React migration.
 
 - **Input files**: `.dat/.csv/.txt`, 2D numeric matrix, no header/index.
   Blank cells = empty string, `nan`, or value >= 2000 → stored as np.nan.
-- **Filename**: `TITLE_PTXXXX_YYYYYYs(ZZZC).ext` — PT+4-digit sample no,
-  6-digit seconds + `s`, 1–3 digit Celsius + `C` in parens.
+  `scan_folder` validates NAME and CONTENT; invalid files are skipped with
+  a logged warning (never abort). A set folder that scans to 0 files →
+  UI shows a "데이터 없음 (no valid data files)" error.
+- **Filename (TOP/BTM)**: `TITLE_PTXXXX_YYYYYYs(ZZZC).ext` — PT+4-digit
+  sample no, 6-digit seconds + `s`, 1–3 digit Celsius + `C` in parens.
   Regex anchors on the LAST `_PT` so titles may contain underscores.
+- **Filename (GAP folder)**: same as OUT files — `TOP{n}-BTM{m}_{H|C}{temp}
+  [_k].ext` (`_k` = duplicate suffix). `parse_gap_filename` → sample_no =
+  TOP no, `btm_no` = BTM no, explicit `phase`, time_s = 0. Legacy
+  `TITLE_PT...` names still parse as fallback (`parse_data_filename`
+  dispatches by kind).
 - **Gap**: `diff = TOP - BTM`; `offset = nanmin(diff)`; `gap = diff - offset`.
   Minimum valid gap is exactly 0.0 (first contact point). NaN propagates.
 - **Resize**: values bilinear-interpolated on normalized grid (no warpage
@@ -81,6 +89,14 @@ charts.py stays Dash-free so it ports directly to the React migration.
   fonts/ticks ad hoc in callbacks.
 - `ChartOptions.show_shape` (default on) appends `rows×cols` to 2D titles
   and 3D trace names.
+- Folder paths picked via native tkinter dialog (`ui/dialogs.py`,
+  Browse... buttons) — OK because the app is local single-user; dialog
+  failures/cancel return None → `no_update`.
+- Reference-size radio (`gap-reference`) and the Original/Resized display
+  radio (`data-show-resized`) live in the Data Options panel. "Resized"
+  previews data exactly as the pipeline consumes it: 2D resizes the
+  non-reference side of the selected pair; 3D brings all selected TOP/BTM
+  datasets onto one reference grid (GAP surfaces untouched).
 
 ## Migration plan (phase 2)
 

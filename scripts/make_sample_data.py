@@ -7,6 +7,10 @@ bowl/saddle shapes with amplitude ~ +/-50, a rectangular blank hole in the
 middle, and blank corners. Written as comma-separated .dat with a few 2000+
 sentinel values marking blanks.
 
+The GAP folder is populated by running the real gap pipeline over the demo
+TOP/BTM data, so its files use the gap naming format
+``TOP{n}-BTM{m}_{H|C}{temp}.txt``.
+
 Run:  python scripts/make_sample_data.py
 """
 
@@ -139,10 +143,16 @@ def main():
                 path = os.path.join(dirs[kind], fname)
                 _write_dat(path, vals, sent, rng)
 
+    # Populate GAP with real pipeline output (gap naming: TOPn-BTMm_H|Ctemp).
+    from matrix2d.services.pipeline import run_pipeline
+
+    gap_results = run_pipeline(dirs["TOP"], dirs["BTM"], dirs["GAP"])
+
     print("Demo data written under: {0}".format(root))
     for k in ("TOP", "BTM"):
         n = len([f for f in os.listdir(dirs[k]) if f.endswith(".dat")])
         print("  {0}: {1} files".format(k, n))
+    print("  GAP: {0} files (pipeline output)".format(len(gap_results)))
 
 
 if __name__ == "__main__":

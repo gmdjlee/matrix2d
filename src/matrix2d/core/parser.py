@@ -17,6 +17,12 @@ _FILENAME_RE = re.compile(
     r"^(?P<title>.*)_PT(?P<sample>\d{4})_(?P<time>\d{6})s\((?P<temp>\d{1,3})C\)$"
 )
 
+# Gap filename format: TOP{n}-BTM{m}_{H|C}{temp}[_k].ext where the optional
+# _k suffix disambiguates duplicate output names (_2, _3, ...).
+_GAP_FILENAME_RE = re.compile(
+    r"^TOP(?P<top>\d+)-BTM(?P<btm>\d+)_(?P<phase>[HC])(?P<temp>\d{1,3})(?:_\d+)?$"
+)
+
 # Values at or above this sentinel threshold are treated as blank.
 BLANK_THRESHOLD = 2000.0
 
@@ -59,6 +65,64 @@ def parse_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
         kind=kind,
         path=path if path else filename,
     )
+
+
+def parse_gap_filename(filename: str, path: str = "") -> SampleMeta:
+    """Parse a gap filename like ``TOP1-BTM12_H250.txt`` into a SampleMeta.
+
+    The result has ``kind="GAP"``, ``sample_no`` = TOP sample number,
+    ``btm_no`` = BTM sample number, an explicit ``phase`` ("H"/"C") and
+    ``time_s=0`` (gap files carry no measurement time). A duplicate suffix
+    (``_2``, ``_3``, ...) is accepted and ignored.
+
+    Args:
+        filename: The filename (with or without directory/extension).
+        path: Optional path stored on the result.
+
+    Returns:
+        A SampleMeta with parsed fields.
+
+    Raises:
+        ValueError: If the filename does not match the gap naming format.
+    """
+    base = os.path.basename(filename)
+    stem, _ext = os.path.splitext(base)
+    match = _GAP_FILENAME_RE.match(stem)
+    if match is None:
+        raise ValueError(
+            "Filename '{0}' does not match gap format "
+            "'TOP{{n}}-BTM{{m}}_{{H|C}}{{temp}}.ext' (stem checked: '{1}')".format(
+                filename, stem
+            )
+        )
+    return SampleMeta(
+        title=stem,
+        sample_no=int(match.group("top")),
+        time_s=0,
+        temp_c=int(match.group("temp")),
+        kind="GAP",
+        path=path if path else filename,
+        btm_no=int(match.group("btm")),
+        phase=match.group("phase"),
+    )
+
+
+def parse_data_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
+    """Parse a data filename for a kind, dispatching on the naming format.
+
+    GAP files use the gap output format ``TOP{n}-BTM{m}_{H|C}{temp}``,
+    falling back to the standard measurement format for legacy files.
+    TOP/BTM always use the measurement format.
+
+    Raises:
+        ValueError: If no applicable format matches.
+    """
+    if kind == "GAP":
+        try:
+            return parse_gap_filename(filename, path=path)
+        except ValueError:
+            return parse_filename(filename, kind, path=path)
+    return parse_filename(filename, kind, path=path)
 
 
 def _parse_cell(token: str) -> float:
@@ -126,7 +190,8 @@ def load_warpage(path: str, kind: str) -> WarpageData:
 
     Args:
         path: Path to the matrix file.
-        kind: "TOP" | "BTM" | "GAP".
+        kind: "TOP" | "BTM" | "GAP" (GAP accepts the gap naming format,
+            see parse_data_filename).
 
     Returns:
         A WarpageData bundling metadata and values.
@@ -134,6 +199,6 @@ def load_warpage(path: str, kind: str) -> WarpageData:
     Raises:
         ValueError: On filename or matrix parse failure.
     """
-    meta = parse_filename(path, kind, path=path)
+    meta = parse_data_filename(path, kind, path=path)
     values = load_matrix(path)
     return WarpageData(meta=meta, values=values)

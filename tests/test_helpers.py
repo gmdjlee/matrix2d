@@ -60,6 +60,46 @@ class TestPhaseEntries:
     def test_empty(self):
         assert helpers.phase_entries([]) == []
 
+    def test_explicit_phase_wins_over_peak_rule(self):
+        # gap-named files carry phase directly; time_s=0 would otherwise
+        # always classify as 'H' via the peak rule
+        gap_c = dict(_md(1, 0, 250, kind="GAP"), phase="C", btm_no=12)
+        entries = helpers.phase_entries([gap_c])
+        assert entries[0]["phase"] == "C"
+
+    def test_explicit_phase_does_not_skew_peak_of_others(self):
+        # a phase-carrying dict for the same sample_no must not join the
+        # peak-time computation of the normal measurement dicts
+        metas = [
+            _md(1, 100, 260),                                # peak at t=100
+            _md(1, 200, 200),                                # cooling
+            dict(_md(1, 0, 250, kind="GAP"), phase="H", btm_no=2),
+        ]
+        entries = helpers.phase_entries(metas)
+        phases = [e["phase"] for e in entries]
+        assert phases == ["H", "C", "H"]
+
+
+class TestMetaDictRoundTrip:
+    def test_gap_fields_roundtrip(self):
+        from matrix2d.core.parser import parse_gap_filename
+        meta = parse_gap_filename("TOP1-BTM12_H250.txt")
+        back = helpers.meta_from_dict(helpers.meta_to_dict(meta))
+        assert back == meta
+
+    def test_old_dict_without_gap_fields(self):
+        # dcc.Store dicts saved before btm_no/phase existed must still load
+        meta = helpers.meta_from_dict(_md(1, 100, 200))
+        assert meta.btm_no is None
+        assert meta.phase is None
+
+    def test_gap_label(self):
+        from matrix2d.core.parser import parse_gap_filename
+        meta = parse_gap_filename("TOP1-BTM12_H250.txt")
+        assert helpers.meta_label(meta) == "GAP TOP1-BTM12 H250C"
+        assert helpers.meta_label_from_dict(
+            helpers.meta_to_dict(meta)) == "GAP TOP1-BTM12 H250C"
+
 
 class TestPhaseTempKey:
     def test_encoding(self):
