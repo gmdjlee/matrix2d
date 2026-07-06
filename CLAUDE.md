@@ -25,6 +25,7 @@ src/matrix2d/
     models.py  # SampleMeta, WarpageData, GapResult dataclasses
     parser.py  # filename parsing + matrix file loading
     resize.py  # bilinear value resize + nearest-neighbor mask resize
+    transform.py # flip/rotate/zero-point orientation transforms
     gap.py     # contact-offset gap computation
     naming.py  # output filename + H/C phase assignment
   services/    # application layer — file I/O, orchestration
@@ -51,6 +52,17 @@ charts.py stays Dash-free so it ports directly to the React migration.
   distortion; linear ramp survives < 1e-6 error). Blank mask resized
   separately with nearest-neighbor; final mask = reference dataset's mask
   union resized mask (`mask_mode="reference"`).
+- **Reference size**: `reference="AUTO"` (default) picks the dataset with
+  the larger element count per job (smaller resized to larger, tie → TOP);
+  explicit `"TOP"`/`"BTM"` overrides. Reference dataset's grid AND mask are
+  authoritative.
+- **Transforms** (before resize, order flip → rotate → zero):
+  flip = left-right mirror INCLUDING value sign inversion (`-fliplr`);
+  rotation = clockwise 90° steps; zero-point = subtract value at a given
+  `(row, col)` cell so it becomes 0.0 — coordinates refer to POST-flip/rotate
+  orientation; blank/OOB zero cell → ValueError. UI: flip/rotate apply to
+  TOP only, zero-point to TOP and BTM. `apply_transform` always returns a
+  new array (never mutates input — matrix cache safety).
 - **H/C phase**: per sample-pair, peak time = time of max temperature;
   `time <= peak` → `H` (heating), else `C` (cooling).
 - **Output name**: `TOP{n}-BTM{m}_{H|C}{temp}.txt` into OUT folder,
@@ -67,6 +79,8 @@ charts.py stays Dash-free so it ports directly to the React migration.
   a module-level dict (single-user local app).
 - Chart styling flows through `ChartOptions` dataclass only — never set
   fonts/ticks ad hoc in callbacks.
+- `ChartOptions.show_shape` (default on) appends `rows×cols` to 2D titles
+  and 3D trace names.
 
 ## Migration plan (phase 2)
 

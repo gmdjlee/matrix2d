@@ -17,7 +17,8 @@ from matrix2d.ui.app import create_app  # noqa: E402
 
 def main():
     app = create_app()
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", "8050"))
+    app.run(debug=True, port=port)
 
 
 if __name__ == "__main__":

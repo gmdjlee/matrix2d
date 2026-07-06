@@ -5,11 +5,14 @@ matrix cache is a simple module-level dict; this is fine for a local,
 single-user Dash app (no concurrency concerns worth engineering for here).
 """
 
+import re
 from typing import Dict, List, Optional
 
 import numpy as np
 
+from matrix2d.core import naming
 from matrix2d.core.models import SampleMeta
+from matrix2d.core.transform import TransformConfig, apply_transform
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,155 @@ def meta_label_from_dict(d: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Selection helpers: phase-aware grouping so the UI can offer
+# "sample number + temperature (H/C)" pickers instead of raw file lists.
+# ---------------------------------------------------------------------------
+
+def phase_entries(meta_dicts: "List[dict]") -> "List[dict]":
+    """Assign an H/C phase to every meta dict, per sample.
+
+    Groups the dicts by sample_no, finds each sample's peak time (time of max
+    temperature) and tags each measurement ``H`` (time <= peak) or ``C``.
+
+    Returns a list of ``{"phase", "temp_c", "time_s", "sample_no", "meta"}``
+    dicts, in the same order as the input. Dicts that fail to convert are
+    skipped.
+    """
+    by_sample = {}  # type: Dict[int, List[dict]]
+    for d in meta_dicts:
+        try:
+            by_sample.setdefault(int(d["sample_no"]), []).append(d)
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    peak_by_sample = {}
+    for sample_no, dicts in by_sample.items():
+        metas = []
+        for d in dicts:
+            try:
+                metas.append(meta_from_dict(d))
+            except (KeyError, TypeError, ValueError):
+                continue  # docstring contract: bad dicts are skipped
+        if not metas:
+            continue
+        peak_by_sample[sample_no] = naming.peak_time(metas)
+
+    entries = []
+    for d in meta_dicts:
+        try:
+            meta_from_dict(d)  # full-convertibility check (docstring contract)
+            sample_no = int(d["sample_no"])
+            time_s = int(d["time_s"])
+            temp_c = int(d["temp_c"])
+            peak = peak_by_sample[sample_no]
+        except (KeyError, TypeError, ValueError):
+            continue
+        phase = naming.assign_phase(time_s, peak)
+        entries.append({
+            "phase": phase,
+            "temp_c": temp_c,
+            "time_s": time_s,
+            "sample_no": sample_no,
+            "meta": d,
+        })
+    return entries
+
+
+def phase_temp_key(phase: str, temp_c: int) -> str:
+    """Encode a (phase, temperature) pair as a dropdown value, e.g. ``H240``."""
+    return "{0}{1}".format(phase, temp_c)
+
+
+def sort_phase_temps(pairs):
+    """Sort (phase, temp) pairs in session order: H by rising temp, then C falling."""
+    heating = sorted(p for p in pairs if p[0] == "H")
+    cooling = sorted((p for p in pairs if p[0] == "C"), key=lambda p: -p[1])
+    return list(heating) + list(cooling)
+
+
+_GAP_NAME_RE = re.compile(r"^TOP(\d+)-BTM(\d+)_(H|C)(\d{1,3})")
+
+
+def parse_gap_name(out_name: str) -> Optional[dict]:
+    """Parse a gap output name like ``TOP1-BTM2_H240.txt`` (``_2`` suffix ok).
+
+    Returns ``{"top_no", "btm_no", "phase", "temp_c"}`` or None if the name
+    does not match the output naming convention.
+    """
+    m = _GAP_NAME_RE.match(out_name)
+    if not m:
+        return None
+    return {
+        "top_no": int(m.group(1)),
+        "btm_no": int(m.group(2)),
+        "phase": m.group(3),
+        "temp_c": int(m.group(4)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Data-transform helpers: translate raw sidebar control values into a
+# TransformConfig (or None for identity). Pure functions, no Dash imports.
+# ---------------------------------------------------------------------------
+
+def _cell_index(value) -> Optional[int]:
+    """Coerce a dcc.Input value to an int index; None/empty/garbage -> None."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_transform_config(flip_value, rotate_value, zero_row, zero_col
+                           ) -> Optional[TransformConfig]:
+    """Build a TransformConfig from raw sidebar control values.
+
+    Args:
+        flip_value: dcc.Checklist value (list or None); flip is on when
+            ``"flip"`` is in it.
+        rotate_value: Dropdown value in clockwise degrees (0/90/180/270);
+            None or "" is treated as 0.
+        zero_row: dcc.Input value for the zero-cell row (None/""/number).
+        zero_col: dcc.Input value for the zero-cell column (None/""/number).
+
+    The zero cell is used only when BOTH row and col are set; a half-filled
+    pair (only row or only col) is treated as "no zero cell".
+
+    Returns:
+        None when every control resolves to the identity transform, else a
+        TransformConfig.
+    """
+    flip = "flip" in (flip_value or [])
+
+    try:
+        degrees = int(rotate_value) if rotate_value not in (None, "") else 0
+    except (TypeError, ValueError):
+        degrees = 0
+    steps = (degrees // 90) % 4
+
+    row = _cell_index(zero_row)
+    col = _cell_index(zero_col)
+    zero = (row, col) if row is not None and col is not None else None
+
+    if not flip and steps == 0 and zero is None:
+        return None
+    return TransformConfig(flip_lr=flip, rot90_cw=steps, zero_cell=zero)
+
+
+def transformed_matrix(meta_dict: dict, config: Optional[TransformConfig]
+                       ) -> np.ndarray:
+    """Load (via the cache) the matrix for a meta dict and apply ``config``.
+
+    apply_transform always returns a new array (even for config=None), so the
+    cached raw matrix is never mutated and never aliased by the result.
+    """
+    values = load_matrix(meta_dict)
+    return apply_transform(values, config)
+
+
+# ---------------------------------------------------------------------------
 # Matrix caches.
 #   _MATRIX_CACHE: keyed by file path -> ndarray (loaded input datasets)
 #   _GAP_CACHE:    keyed by out_name  -> ndarray (computed gap results)
@@ -93,10 +245,6 @@ def cache_gap(out_name: str, gap: np.ndarray) -> None:
 
 def get_gap(out_name: str) -> Optional[np.ndarray]:
     return _GAP_CACHE.get(out_name)
-
-
-def gap_names() -> List[str]:
-    return list(_GAP_CACHE.keys())
 
 
 def clear_gaps() -> None:

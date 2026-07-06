@@ -1,7 +1,8 @@
 """Dash layout for the single-page warpage-analysis app.
 
-Left sidebar (folders panel + chart options) and a main content area driven by
-dcc.Tabs (2D view / 3D view / Gap compute). No multi-page routing.
+Left sidebar (folders panel + data options + chart options) and a main content
+area driven by dcc.Tabs (2D view / 3D view / Gap compute). No multi-page
+routing.
 """
 
 import os
@@ -59,6 +60,54 @@ def _num(id_, value, step=None, placeholder=""):
                      placeholder=placeholder, className="input-full")
 
 
+ROTATE_OPTIONS = [
+    {"label": "0°", "value": 0},
+    {"label": "90° CW", "value": 90},
+    {"label": "180° CW", "value": 180},
+    {"label": "270° CW", "value": 270},
+]
+
+
+def _data_options_panel() -> html.Div:
+    return html.Div(
+        className="panel",
+        children=[
+            html.H3("Data Options"),
+            html.Div(className="field", children=[
+                dcc.Checklist(id="data-top-flip",
+                              options=[
+                                  {"label": " Flip TOP (L-R + invert values)",
+                                   "value": "flip"},
+                              ],
+                              value=[], className="checklist"),
+            ]),
+            html.Div(className="field", children=[
+                html.Label("TOP Rotate"),
+                dcc.Dropdown(id="data-top-rotate", options=ROTATE_OPTIONS,
+                             value=0, clearable=False),
+            ]),
+            html.Div(className="field", children=[
+                html.Label("TOP Zero cell (row, col)")]),
+            html.Div(className="row", children=[
+                html.Div(className="field half", children=[
+                    _num("data-top-zero-row", None, step=1, placeholder="row")]),
+                html.Div(className="field half", children=[
+                    _num("data-top-zero-col", None, step=1, placeholder="col")]),
+            ]),
+            html.Div(className="field", children=[
+                html.Label("BTM Zero cell (row, col)")]),
+            html.Div(className="row", children=[
+                html.Div(className="field half", children=[
+                    _num("data-btm-zero-row", None, step=1, placeholder="row")]),
+                html.Div(className="field half", children=[
+                    _num("data-btm-zero-col", None, step=1, placeholder="col")]),
+            ]),
+            html.Div("Zero cell coordinates apply after flip/rotate.",
+                     className="status"),
+        ],
+    )
+
+
 def _chart_options_panel() -> html.Div:
     return html.Div(
         className="panel",
@@ -99,8 +148,9 @@ def _chart_options_panel() -> html.Div:
                               options=[
                                   {"label": " Reverse colorscale", "value": "reverse"},
                                   {"label": " Show colorbar", "value": "colorbar"},
+                                  {"label": " Show shape", "value": "shape"},
                               ],
-                              value=["colorbar"], className="checklist"),
+                              value=["colorbar", "shape"], className="checklist"),
             ]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
@@ -124,8 +174,19 @@ def _tab_2d() -> html.Div:
     return html.Div(className="tab-body", children=[
         html.Div(className="controls-row", children=[
             html.Div(className="field grow", children=[
-                html.Label("Dataset"),
-                dcc.Dropdown(id="view2d-dataset", options=[], placeholder="scan a folder first"),
+                html.Label("TOP sample"),
+                dcc.Dropdown(id="view2d-top-sample", options=[],
+                             placeholder="scan a folder first"),
+            ]),
+            html.Div(className="field grow", children=[
+                html.Label("BTM sample"),
+                dcc.Dropdown(id="view2d-btm-sample", options=[],
+                             placeholder="scan a folder first"),
+            ]),
+            html.Div(className="field grow", children=[
+                html.Label("Temperature (common)"),
+                dcc.Dropdown(id="view2d-temp", options=[],
+                             placeholder="select sample(s) first"),
             ]),
             html.Div(className="field", children=[
                 html.Label("Chart type"),
@@ -136,8 +197,11 @@ def _tab_2d() -> html.Div:
             ]),
         ]),
         html.Div(id="view2d-error", className="error"),
-        dcc.Graph(id="view2d-graph", className="graph"),
-        html.Button("Save current figure to OUT as PNG", id="btn-export-2d",
+        html.Div(className="graph-pair", children=[
+            dcc.Graph(id="view2d-graph-top", className="graph half"),
+            dcc.Graph(id="view2d-graph-btm", className="graph half"),
+        ]),
+        html.Button("Save current figures to OUT as PNG", id="btn-export-2d",
                     n_clicks=0, className="btn"),
         html.Div(id="export2d-status", className="status"),
     ])
@@ -145,10 +209,34 @@ def _tab_2d() -> html.Div:
 
 def _tab_3d() -> html.Div:
     return html.Div(className="tab-body", children=[
-        html.Div(className="field", children=[
-            html.Label("Datasets (TOP / BTM / GAP inputs and computed gaps)"),
-            dcc.Dropdown(id="view3d-datasets", options=[], multi=True,
-                         placeholder="scan / compute first"),
+        html.Div(className="controls-row", children=[
+            html.Div(className="field grow", children=[
+                html.Label("Filter: sample no."),
+                dcc.Dropdown(id="view3d-filter-sample", options=[], multi=True,
+                             placeholder="all samples"),
+            ]),
+            html.Div(className="field grow", children=[
+                html.Label("Filter: temperature"),
+                dcc.Dropdown(id="view3d-filter-temp", options=[], multi=True,
+                             placeholder="all temperatures"),
+            ]),
+        ]),
+        html.Div(className="controls-row", children=[
+            html.Div(className="field grow", children=[
+                html.Label("TOP datasets"),
+                dcc.Dropdown(id="view3d-top", options=[], multi=True,
+                             placeholder="scan first"),
+            ]),
+            html.Div(className="field grow", children=[
+                html.Label("BTM datasets"),
+                dcc.Dropdown(id="view3d-btm", options=[], multi=True,
+                             placeholder="scan first"),
+            ]),
+            html.Div(className="field grow", children=[
+                html.Label("GAP datasets (scanned + computed)"),
+                dcc.Dropdown(id="view3d-gap", options=[], multi=True,
+                             placeholder="scan / compute first"),
+            ]),
         ]),
         # per-dataset z-offset inputs are injected here by a pattern-matching callback
         html.Div(id="view3d-offsets", className="offsets"),
@@ -166,9 +254,11 @@ def _tab_gap() -> html.Div:
             html.Div(className="field", children=[
                 html.Label("Reference size"),
                 dcc.RadioItems(id="gap-reference",
-                               options=[{"label": " TOP", "value": "TOP"},
+                               options=[{"label": " Auto (smaller → larger)",
+                                         "value": "AUTO"},
+                                        {"label": " TOP", "value": "TOP"},
                                         {"label": " BTM", "value": "BTM"}],
-                               value="TOP", className="radio-inline"),
+                               value="AUTO", className="radio-inline"),
             ]),
             html.Button("Compute All Gaps", id="btn-compute-gaps",
                         n_clicks=0, className="btn btn-primary"),
@@ -199,6 +289,7 @@ def build_layout() -> html.Div:
         html.Div(className="sidebar", children=[
             html.H1("Warpage Analysis"),
             _folders_panel(),
+            _data_options_panel(),
             _chart_options_panel(),
         ]),
 

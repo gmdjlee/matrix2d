@@ -2,14 +2,24 @@
 
 All folder / pipeline calls are wrapped in try/except so a bad path or a
 core error surfaces as a message in an html.Div instead of crashing the app.
+
+Dataset selection model:
+  * 2D view — pick a TOP sample, a BTM sample and a common temperature
+    (phase-aware: the same Celsius value can occur twice per session, once
+    while heating 'H' and once while cooling 'C'). Two charts render side
+    by side, one per surface.
+  * 3D view — TOP / BTM / GAP datasets are selected in three separate
+    dropdowns; a sample-number / temperature filter row narrows the options
+    when folders contain many files.
 """
 
+import dataclasses
 import os
 import traceback
 from typing import List, Optional
 
 import numpy as np
-from dash import ALL, MATCH, Input, Output, State, callback_context, dcc, html, no_update
+from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.ui import charts, helpers
 
@@ -40,6 +50,7 @@ def _build_options(title, font_family, font_size, title_size, tick_size,
         colorscale=colorscale or "Jet",
         reverse_colorscale="reverse" in toggles,
         show_colorbar="colorbar" in toggles,
+        show_shape="shape" in toggles,
         zmin=_float(zmin),
         zmax=_float(zmax),
         contour_levels=_int(contour_levels),
@@ -68,6 +79,39 @@ _OPTION_STATES = [
 # Same set but as Inputs, so charts re-render live when options change.
 _OPTION_INPUTS = [Input(s.component_id, s.component_property) for s in _OPTION_STATES]
 
+# Data-transform controls (Data Options panel). Order matters: the first four
+# feed the TOP config (flip / rotate / zero cell), the last two the BTM config
+# (zero cell only).
+_TRANSFORM_STATES = [
+    State("data-top-flip", "value"),
+    State("data-top-rotate", "value"),
+    State("data-top-zero-row", "value"),
+    State("data-top-zero-col", "value"),
+    State("data-btm-zero-row", "value"),
+    State("data-btm-zero-col", "value"),
+]
+
+# As Inputs, so previews re-render live when transforms change.
+_TRANSFORM_INPUTS = [Input(s.component_id, s.component_property)
+                     for s in _TRANSFORM_STATES]
+
+
+def _transform_configs(transform_values):
+    """(top_config, btm_config) from the _TRANSFORM_STATES value tuple."""
+    flip, rotate, tz_row, tz_col, bz_row, bz_col = transform_values
+    top_cfg = helpers.build_transform_config(flip, rotate, tz_row, tz_col)
+    btm_cfg = helpers.build_transform_config(None, 0, bz_row, bz_col)
+    return top_cfg, btm_cfg
+
+
+def _config_for_kind(kind, top_cfg, btm_cfg):
+    """Transform config for a dataset kind; GAP data is never transformed."""
+    if kind == "TOP":
+        return top_cfg
+    if kind == "BTM":
+        return btm_cfg
+    return None
+
 
 def _empty_fig(message: str = ""):
     fig = charts.go.Figure()
@@ -80,7 +124,7 @@ def _empty_fig(message: str = ""):
 
 
 # ---------------------------------------------------------------------------
-# dataset key helpers: a selected 3D/2D dataset is identified by a string key.
+# dataset key helpers: a selected 3D dataset is identified by a string key.
 #   input datasets:   "meta::<path>"
 #   computed gaps:    "gap::<out_name>"
 # ---------------------------------------------------------------------------
@@ -96,7 +140,7 @@ def _gap_key(out_name: str) -> str:
 def _all_meta_dicts(store_metas) -> List[dict]:
     out = []
     for kind in ("TOP", "BTM", "GAP"):
-        out.extend(store_metas.get(kind, []))
+        out.extend((store_metas or {}).get(kind, []))
     return out
 
 
@@ -107,8 +151,13 @@ def _find_meta(store_metas, path) -> Optional[dict]:
     return None
 
 
-def _resolve_values(key: str, store_metas):
-    """Return ndarray for a dataset key, loading/caching as needed."""
+def _resolve_values(key: str, store_metas, top_cfg=None, btm_cfg=None):
+    """Return ndarray for a dataset key, loading/caching as needed.
+
+    Input datasets get the transform for their kind (TOP: flip/rotate/zero,
+    BTM: zero); computed gaps are returned as-is. May raise ValueError when a
+    zero cell is out of bounds or blank.
+    """
     if key.startswith("gap::"):
         out_name = key[len("gap::"):]
         return helpers.get_gap(out_name)
@@ -117,7 +166,8 @@ def _resolve_values(key: str, store_metas):
         md = _find_meta(store_metas, path)
         if md is None:
             return None
-        return helpers.load_matrix(md)
+        cfg = _config_for_kind(md.get("kind"), top_cfg, btm_cfg)
+        return helpers.transformed_matrix(md, cfg)
     return None
 
 
@@ -131,15 +181,72 @@ def _key_label(key: str, store_metas) -> str:
     return key
 
 
+# ---------------------------------------------------------------------------
+# selection helpers (sample / phase+temperature pickers).
+# ---------------------------------------------------------------------------
+
+def _kind_metas(store_metas, kind: str) -> List[dict]:
+    return (store_metas or {}).get(kind, [])
+
+
+def _sample_options(meta_dicts: List[dict]) -> List[dict]:
+    """Dropdown options: one entry per distinct sample number."""
+    counts = {}
+    for d in meta_dicts:
+        try:
+            counts[int(d["sample_no"])] = counts.get(int(d["sample_no"]), 0) + 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return [
+        {"label": "PT{0:04d} ({1} files)".format(no, counts[no]), "value": no}
+        for no in sorted(counts)
+    ]
+
+
+def _sample_phase_temps(meta_dicts: List[dict], sample_no) -> "set":
+    """Set of (phase, temp_c) available for one sample within a kind."""
+    if sample_no is None:
+        return set()
+    return {
+        (e["phase"], e["temp_c"])
+        for e in helpers.phase_entries(meta_dicts)
+        if e["sample_no"] == int(sample_no)
+    }
+
+
+def _entry_for(meta_dicts: List[dict], sample_no, phase_temp: str) -> Optional[dict]:
+    """First phase entry matching a sample and an encoded 'H240' key."""
+    for e in helpers.phase_entries(meta_dicts):
+        if e["sample_no"] == int(sample_no) and \
+                helpers.phase_temp_key(e["phase"], e["temp_c"]) == phase_temp:
+            return e
+    return None
+
+
+def _phase_label(entry: dict) -> str:
+    """Dropdown label with the phase folded in, e.g. 'TOP PT0001 H240C 192s'."""
+    meta = entry["meta"]
+    try:
+        sample = "PT{0:04d}".format(int(meta.get("sample_no")))
+    except (TypeError, ValueError):
+        sample = "PT????"
+    return "{kind} {sample} {phase}{temp}C {time}s".format(
+        kind=meta.get("kind", "?"),
+        sample=sample,
+        phase=entry["phase"],
+        temp=entry["temp_c"],
+        time=entry["time_s"],
+    )
+
+
 def register_callbacks(app):
     # -------------------------------------------------------------------
-    # 1. Scan folders -> store metas, populate dropdowns, show counts.
+    # 1. Scan folders -> store metas, show counts. Dropdown options are
+    #    derived reactively from the store by the callbacks below.
     # -------------------------------------------------------------------
     @app.callback(
         Output("store-metas", "data"),
         Output("scan-status", "children"),
-        Output("view2d-dataset", "options"),
-        Output("view3d-datasets", "options"),
         Input("btn-scan", "n_clicks"),
         State("folder-top", "value"),
         State("folder-btm", "value"),
@@ -169,88 +276,254 @@ def register_callbacks(app):
             status_children.append(
                 html.Div("Errors: " + " | ".join(errors), className="error"))
 
-        # 2D options: every input dataset
-        opts_2d = [
-            {"label": helpers.meta_label_from_dict(d), "value": _meta_key(d["path"])}
-            for d in _all_meta_dicts(result)
-        ]
-        # 3D options: input datasets + any already-computed gaps
-        opts_3d = list(opts_2d)
-        for name in helpers.gap_names():
-            opts_3d.append({"label": "GAP " + name, "value": _gap_key(name)})
-
-        return result, status_children, opts_2d, opts_3d
+        return result, status_children
 
     # -------------------------------------------------------------------
-    # 2. 2D view render.
+    # 2. 2D view: sample pickers -> common temperature picker -> two charts.
     # -------------------------------------------------------------------
     @app.callback(
-        Output("view2d-graph", "figure"),
+        Output("view2d-top-sample", "options"),
+        Output("view2d-btm-sample", "options"),
+        Output("view2d-top-sample", "value"),
+        Output("view2d-btm-sample", "value"),
+        Input("store-metas", "data"),
+        State("view2d-top-sample", "value"),
+        State("view2d-btm-sample", "value"),
+        prevent_initial_call=True,
+    )
+    def update_2d_sample_options(store_metas, cur_top, cur_btm):
+        top_opts = _sample_options(_kind_metas(store_metas, "TOP"))
+        btm_opts = _sample_options(_kind_metas(store_metas, "BTM"))
+
+        def _prune(cur, opts):
+            return cur if any(o["value"] == cur for o in opts) else None
+
+        return (top_opts, btm_opts,
+                _prune(cur_top, top_opts), _prune(cur_btm, btm_opts))
+
+    @app.callback(
+        Output("view2d-temp", "options"),
+        Output("view2d-temp", "value"),
+        Input("view2d-top-sample", "value"),
+        Input("view2d-btm-sample", "value"),
+        Input("store-metas", "data"),
+        State("view2d-temp", "value"),
+        prevent_initial_call=True,
+    )
+    def update_2d_temp_options(top_sample, btm_sample, store_metas, current):
+        top_set = _sample_phase_temps(_kind_metas(store_metas, "TOP"), top_sample)
+        btm_set = _sample_phase_temps(_kind_metas(store_metas, "BTM"), btm_sample)
+
+        if top_sample is not None and btm_sample is not None:
+            pairs = top_set & btm_set
+        else:
+            pairs = top_set | btm_set
+
+        options = [
+            {"label": "{0} {1}C".format(phase, temp),
+             "value": helpers.phase_temp_key(phase, temp)}
+            for phase, temp in helpers.sort_phase_temps(pairs)
+        ]
+        value = current if any(o["value"] == current for o in options) else None
+        return options, value
+
+    @app.callback(
+        Output("view2d-graph-top", "figure"),
+        Output("view2d-graph-btm", "figure"),
         Output("view2d-error", "children"),
-        [Input("view2d-dataset", "value"), Input("view2d-type", "value")]
-        + _OPTION_INPUTS,
+        [Input("view2d-top-sample", "value"),
+         Input("view2d-btm-sample", "value"),
+         Input("view2d-temp", "value"),
+         Input("view2d-type", "value")]
+        + _OPTION_INPUTS + _TRANSFORM_INPUTS,
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def render_2d(dataset_key, chart_type, *rest):
-        option_values = rest[:-1]
+    def render_2d(top_sample, btm_sample, phase_temp, chart_type, *rest):
+        option_values = rest[:len(_OPTION_STATES)]
+        transform_values = rest[len(_OPTION_STATES):-1]
         store_metas = rest[-1]
-        if not dataset_key:
-            return _empty_fig("Select a dataset"), ""
+        if top_sample is None and btm_sample is None:
+            return (_empty_fig("Select a TOP sample"),
+                    _empty_fig("Select a BTM sample"), "")
         try:
-            values = _resolve_values(dataset_key, store_metas)
-            if values is None:
-                return _empty_fig(), "Dataset not found / not loaded."
             opts = _build_options(*option_values)
-            if not opts.title:
-                opts.title = _key_label(dataset_key, store_metas)
-            if chart_type == "heatmap":
-                fig = charts.heatmap_2d(values, opts)
-            else:
-                fig = charts.contour_2d(values, opts)
-            return fig, ""
+            top_cfg, btm_cfg = _transform_configs(transform_values)
+
+            def _side_fig(kind, sample_no):
+                if sample_no is None:
+                    return _empty_fig("Select a {0} sample".format(kind))
+                if not phase_temp:
+                    return _empty_fig("Select a temperature")
+                entry = _entry_for(_kind_metas(store_metas, kind),
+                                   sample_no, phase_temp)
+                if entry is None:
+                    return _empty_fig("No {0} file at {1}".format(kind, phase_temp))
+                cfg = _config_for_kind(kind, top_cfg, btm_cfg)
+                try:
+                    values = helpers.transformed_matrix(entry["meta"], cfg)
+                except ValueError as exc:  # e.g. zero cell out of bounds / blank
+                    return _empty_fig("{0}: {1}".format(kind, exc))
+                side_opts = dataclasses.replace(
+                    opts, title=opts.title or _phase_label(entry))
+                if chart_type == "heatmap":
+                    return charts.heatmap_2d(values, side_opts)
+                return charts.contour_2d(values, side_opts)
+
+            fig_top = _side_fig("TOP", top_sample)
+            fig_btm = _side_fig("BTM", btm_sample)
+            return fig_top, fig_btm, ""
         except Exception:  # noqa: BLE001
-            return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
+            return (_empty_fig(), _empty_fig(),
+                    "Render error: " + traceback.format_exc(limit=2))
 
     # -------------------------------------------------------------------
-    # 3. 3D view: build per-dataset z-offset inputs (pattern-matching).
+    # 3. 3D view: filters -> per-kind dataset options -> offsets -> render.
     # -------------------------------------------------------------------
+    @app.callback(
+        Output("view3d-filter-sample", "options"),
+        Output("view3d-filter-temp", "options"),
+        Output("view3d-filter-sample", "value"),
+        Output("view3d-filter-temp", "value"),
+        Input("store-metas", "data"),
+        Input("store-gaps", "data"),
+        State("view3d-filter-sample", "value"),
+        State("view3d-filter-temp", "value"),
+        prevent_initial_call=True,
+    )
+    def update_3d_filter_options(store_metas, store_gaps, cur_samples, cur_temps):
+        samples = set()
+        temps = set()
+        for d in _all_meta_dicts(store_metas):
+            try:
+                samples.add(int(d["sample_no"]))
+                temps.add(int(d["temp_c"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        for s in store_gaps or []:
+            parsed = helpers.parse_gap_name(s.get("out_name", ""))
+            if parsed:
+                samples.add(parsed["top_no"])
+                samples.add(parsed["btm_no"])
+                temps.add(parsed["temp_c"])
+        sample_opts = [{"label": "PT{0:04d}".format(n), "value": n}
+                       for n in sorted(samples)]
+        temp_opts = [{"label": "{0}C".format(t), "value": t}
+                     for t in sorted(temps)]
+        new_samples = [v for v in (cur_samples or []) if v in samples]
+        new_temps = [v for v in (cur_temps or []) if v in temps]
+        return sample_opts, temp_opts, new_samples, new_temps
+
+    @app.callback(
+        Output("view3d-top", "options"),
+        Output("view3d-btm", "options"),
+        Output("view3d-gap", "options"),
+        Output("view3d-top", "value"),
+        Output("view3d-btm", "value"),
+        Output("view3d-gap", "value"),
+        Input("store-metas", "data"),
+        Input("store-gaps", "data"),
+        Input("view3d-filter-sample", "value"),
+        Input("view3d-filter-temp", "value"),
+        State("view3d-top", "value"),
+        State("view3d-btm", "value"),
+        State("view3d-gap", "value"),
+        prevent_initial_call=True,
+    )
+    def update_3d_dataset_options(store_metas, store_gaps, f_samples, f_temps,
+                                  cur_top, cur_btm, cur_gap):
+        f_samples = set(f_samples or [])
+        f_temps = set(f_temps or [])
+
+        def _meta_opts(kind):
+            opts = []
+            for e in helpers.phase_entries(_kind_metas(store_metas, kind)):
+                if f_samples and e["sample_no"] not in f_samples:
+                    continue
+                if f_temps and e["temp_c"] not in f_temps:
+                    continue
+                opts.append({"label": _phase_label(e),
+                             "value": _meta_key(e["meta"]["path"])})
+            return opts
+
+        gap_opts = _meta_opts("GAP")  # scanned GAP folder files
+        for s in store_gaps or []:    # computed gap results
+            name = s.get("out_name", "")
+            parsed = helpers.parse_gap_name(name)
+            if parsed:
+                if f_samples and not (parsed["top_no"] in f_samples
+                                      or parsed["btm_no"] in f_samples):
+                    continue
+                if f_temps and parsed["temp_c"] not in f_temps:
+                    continue
+            gap_opts.append({"label": "GAP " + name, "value": _gap_key(name)})
+
+        # Prune selections whose underlying data is gone (re-scan/recompute).
+        # Selections merely hidden by the filters are kept.
+        def _valid_meta_keys(kind):
+            return {_meta_key(d["path"]) for d in _kind_metas(store_metas, kind)}
+
+        valid_gap = _valid_meta_keys("GAP") | {
+            _gap_key(s.get("out_name", "")) for s in store_gaps or []}
+
+        def _prune(cur, valid):
+            return [v for v in (cur or []) if v in valid]
+
+        return (_meta_opts("TOP"), _meta_opts("BTM"), gap_opts,
+                _prune(cur_top, _valid_meta_keys("TOP")),
+                _prune(cur_btm, _valid_meta_keys("BTM")),
+                _prune(cur_gap, valid_gap))
+
+    # 3b. per-dataset z-offset inputs (pattern-matching). Existing values are
+    # carried over so editing the selection does not wipe user-entered offsets.
     @app.callback(
         Output("view3d-offsets", "children"),
-        Input("view3d-datasets", "value"),
+        Input("view3d-top", "value"),
+        Input("view3d-btm", "value"),
+        Input("view3d-gap", "value"),
+        State({"type": "z-offset", "key": ALL}, "value"),
+        State({"type": "z-offset", "key": ALL}, "id"),
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def build_offset_inputs(selected_keys, store_metas):
-        selected_keys = selected_keys or []
+    def build_offset_inputs(top_keys, btm_keys, gap_keys,
+                            prev_values, prev_ids, store_metas):
+        prev = {}
+        for oid, oval in zip(prev_ids or [], prev_values or []):
+            prev[oid["key"]] = oval
         rows = []
-        for key in selected_keys:
+        for key in (top_keys or []) + (btm_keys or []) + (gap_keys or []):
             label = _key_label(key, store_metas)
             rows.append(html.Div(className="offset-row", children=[
                 html.Span(label, className="offset-label"),
                 dcc.Input(
                     id={"type": "z-offset", "key": key},
-                    type="number", value=0.0, step=0.1,
+                    type="number", value=prev.get(key, 0.0), step=0.1,
                     className="offset-input",
                 ),
             ]))
         return rows
 
-    # 3b. 3D view render (reacts to selection, offsets, options).
+    # 3c. 3D render (reacts to selections, offsets, options).
     @app.callback(
         Output("view3d-graph", "figure"),
         Output("view3d-error", "children"),
-        [Input("view3d-datasets", "value"),
+        [Input("view3d-top", "value"),
+         Input("view3d-btm", "value"),
+         Input("view3d-gap", "value"),
+         Input("store-gaps", "data"),  # recompute -> re-render gap surfaces
          Input({"type": "z-offset", "key": ALL}, "value"),
          Input({"type": "z-offset", "key": ALL}, "id")]
-        + _OPTION_INPUTS,
+        + _OPTION_INPUTS + _TRANSFORM_INPUTS,
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def render_3d(selected_keys, offset_values, offset_ids, *rest):
-        option_values = rest[:-1]
+    def render_3d(top_keys, btm_keys, gap_keys, _store_gaps,
+                  offset_values, offset_ids, *rest):
+        option_values = rest[:len(_OPTION_STATES)]
+        transform_values = rest[len(_OPTION_STATES):-1]
         store_metas = rest[-1]
-        selected_keys = selected_keys or []
+        selected_keys = (top_keys or []) + (btm_keys or []) + (gap_keys or [])
         if not selected_keys:
             return _empty_fig("Select datasets"), ""
         try:
@@ -259,18 +532,30 @@ def register_callbacks(app):
             for oid, oval in zip(offset_ids or [], offset_values or []):
                 offset_map[oid["key"]] = float(oval) if oval is not None else 0.0
 
+            opts = _build_options(*option_values)
+            top_cfg, btm_cfg = _transform_configs(transform_values)
+
             items = []
             missing = []
             for key in selected_keys:
-                values = _resolve_values(key, store_metas)
+                try:
+                    values = _resolve_values(key, store_metas, top_cfg, btm_cfg)
+                except ValueError as exc:  # zero cell out of bounds / blank
+                    missing.append("{0} ({1})".format(
+                        _key_label(key, store_metas), exc))
+                    continue
                 if values is None:
                     missing.append(key)
                     continue
-                items.append((_key_label(key, store_metas), values,
-                              offset_map.get(key, 0.0)))
+                label = _key_label(key, store_metas)
+                if opts.show_shape:
+                    # multi_surface_3d takes prebuilt names, so the shape
+                    # suffix is folded into the label here.
+                    label = "{0} ({1}×{2})".format(
+                        label, values.shape[0], values.shape[1])
+                items.append((label, values, offset_map.get(key, 0.0)))
             if not items:
                 return _empty_fig(), "No loadable datasets selected."
-            opts = _build_options(*option_values)
             fig = charts.multi_surface_3d(items, opts)
             err = ""
             if missing:
@@ -280,34 +565,43 @@ def register_callbacks(app):
             return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
-    # 4. Gap compute: run pipeline, build table + result dropdowns.
+    # 4. Gap compute: run pipeline, build table + result dropdown.
+    #    (3D options refresh automatically via the store-gaps Input above.)
     # -------------------------------------------------------------------
     @app.callback(
         Output("store-gaps", "data"),
         Output("gap-table", "children"),
         Output("gap-error", "children"),
         Output("gap-result-select", "options"),
-        Output("view3d-datasets", "options", allow_duplicate=True),
+        Output("gap-result-select", "value"),
         Input("btn-compute-gaps", "n_clicks"),
-        State("folder-top", "value"),
-        State("folder-btm", "value"),
-        State("folder-out", "value"),
-        State("gap-reference", "value"),
-        State("store-metas", "data"),
+        [State("folder-top", "value"),
+         State("folder-btm", "value"),
+         State("folder-out", "value"),
+         State("gap-reference", "value")]
+        + _TRANSFORM_STATES,
         prevent_initial_call=True,
     )
-    def compute_gaps(_n, top_dir, btm_dir, out_dir, reference, store_metas):
+    def compute_gaps(_n, top_dir, btm_dir, out_dir, reference,
+                     *transform_values):
         from matrix2d.services.pipeline import run_pipeline
 
         if not top_dir or not btm_dir or not out_dir:
-            return no_update, no_update, "TOP, BTM and OUT folders are required.", \
-                no_update, no_update
+            return no_update, no_update, \
+                "TOP, BTM and OUT folders are required.", no_update, no_update
+        top_cfg, btm_cfg = _transform_configs(transform_values)
         try:
-            helpers.clear_gaps()
-            results = run_pipeline(top_dir, btm_dir, out_dir, reference=reference)
+            results = run_pipeline(top_dir, btm_dir, out_dir,
+                                   reference=reference,
+                                   top_transform=top_cfg,
+                                   btm_transform=btm_cfg)
         except Exception:  # noqa: BLE001
             return no_update, no_update, \
-                "Pipeline error: " + traceback.format_exc(limit=3), no_update, no_update
+                "Pipeline error: " + traceback.format_exc(limit=3), \
+                no_update, no_update
+        # clear the old cache only after the pipeline succeeded, so a failed
+        # run does not leave store-gaps pointing at purged cache entries.
+        helpers.clear_gaps()
 
         rows = []
         summaries = []
@@ -335,23 +629,24 @@ def register_callbacks(app):
                 html.Td("{:.4g}".format(s["offset"]) if s["offset"] is not None else ""),
                 html.Td(s["out_path"]),
             ]))
-        table = html.Table([header] + rows, className="result-table")
+        table = html.Table([html.Thead(header), html.Tbody(rows)],
+                           className="result-table")
 
         result_opts = [{"label": s["out_name"], "value": _gap_key(s["out_name"])}
                        for s in summaries]
 
-        # refresh 3D options: inputs + freshly computed gaps
-        opts_3d = [
-            {"label": helpers.meta_label_from_dict(d), "value": _meta_key(d["path"])}
-            for d in _all_meta_dicts(store_metas or {})
-        ]
-        opts_3d.extend(
-            {"label": "GAP " + s["out_name"], "value": _gap_key(s["out_name"])}
-            for s in summaries
-        )
-
-        msg = "Computed {n} gap(s).".format(n=len(summaries))
-        return summaries, table, html.Span(msg, className="ok"), result_opts, opts_3d
+        # run_pipeline returns successes only (failed jobs are logged and
+        # skipped), so an empty result set deserves a warning, not an "ok".
+        if not summaries:
+            msg = ("Computed 0 gap(s) — no pairs found or every job failed "
+                   "(bad zero cell?). See the server log for per-job errors.")
+            status = html.Span(msg, className="error")
+        else:
+            status = html.Span(
+                "Computed {n} gap(s).".format(n=len(summaries)), className="ok")
+        # reset the inspect selection: out_names can be identical across runs,
+        # so keeping the value would leave a chart of the previous run's data.
+        return summaries, table, status, result_opts, None
 
     # 4b. Inspect a chosen computed gap: 2D contour + 3D surface.
     @app.callback(
@@ -380,10 +675,11 @@ def register_callbacks(app):
                 "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
-    # 5. Export current 2D / 3D figure to OUT as PNG (kaleido).
+    # 5. Export current 2D / 3D figures to OUT as PNG (kaleido).
     # -------------------------------------------------------------------
     def _export(fig_dict, out_dir, default_name):
-        if not fig_dict:
+        # placeholder figures ("Select a sample" etc.) have no data traces
+        if not fig_dict or not fig_dict.get("data"):
             return "Nothing to export."
         if not out_dir:
             return "Set an OUT folder first."
@@ -399,12 +695,17 @@ def register_callbacks(app):
     @app.callback(
         Output("export2d-status", "children"),
         Input("btn-export-2d", "n_clicks"),
-        State("view2d-graph", "figure"),
+        State("view2d-graph-top", "figure"),
+        State("view2d-graph-btm", "figure"),
         State("folder-out", "value"),
         prevent_initial_call=True,
     )
-    def export_2d(_n, fig_dict, out_dir):
-        return _export(fig_dict, out_dir, "chart_2d.png")
+    def export_2d(_n, fig_top, fig_btm, out_dir):
+        msgs = [
+            "TOP: " + _export(fig_top, out_dir, "chart_2d_top.png"),
+            "BTM: " + _export(fig_btm, out_dir, "chart_2d_btm.png"),
+        ]
+        return [html.Div(m) for m in msgs]
 
     @app.callback(
         Output("export3d-status", "children"),

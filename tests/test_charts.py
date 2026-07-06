@@ -63,7 +63,7 @@ def test_multi_surface_returns_figure(sample):
 
 def test_font_and_title_applied(sample):
     opts = ChartOptions(title="My Title", font_size=20, title_font_size=28,
-                        font_family="Times New Roman")
+                        font_family="Times New Roman", show_shape=False)
     fig = contour_2d(sample, opts)
     assert fig.layout.title.text == "My Title"
     assert fig.layout.font.size == 20
@@ -123,6 +123,46 @@ def test_contour_levels_applied(sample):
     assert contours.start == 0.0
     assert contours.end == 10.0
     assert contours.size == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# matrix shape display
+# ---------------------------------------------------------------------------
+
+def test_shape_suffix_in_2d_titles(sample):
+    opts = ChartOptions(title="Gap")
+    assert contour_2d(sample, opts).layout.title.text == "Gap (3×3)"
+    assert heatmap_2d(sample, opts).layout.title.text == "Gap (3×3)"
+
+
+def test_shape_suffix_empty_title(sample):
+    # no title -> bare shape becomes the title
+    assert contour_2d(sample, ChartOptions()).layout.title.text == "3×3"
+    assert heatmap_2d(sample, ChartOptions()).layout.title.text == "3×3"
+
+
+def test_shape_suffix_disabled(sample):
+    opts = ChartOptions(title="Gap", show_shape=False)
+    assert contour_2d(sample, opts).layout.title.text == "Gap"
+    assert heatmap_2d(sample, opts).layout.title.text == "Gap"
+    fig = surface_3d(sample, opts, name="top")
+    assert fig.data[0].name == "top"
+
+
+def test_shape_suffix_in_surface_trace_name(sample):
+    fig = surface_3d(sample, ChartOptions(), name="top")
+    assert fig.data[0].name == "top (3×3)"
+    # legend visibility still keyed on the caller-provided name
+    assert fig.data[0].showlegend is True
+    fig_unnamed = surface_3d(sample, ChartOptions())
+    assert fig_unnamed.data[0].name == "3×3"
+    assert fig_unnamed.data[0].showlegend is False
+
+
+def test_shape_reflects_coerced_array():
+    # 1D input is coerced to a single-row 2D array before charting
+    fig = heatmap_2d([1.0, 2.0, 3.0], ChartOptions())
+    assert fig.layout.title.text == "1×3"
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@
       "name": "matrix2d",
       "runtimeExecutable": "python",
       "runtimeArgs": ["run_app.py"],
-      "port": 8050
+      "port": 8050,
+      "autoPort": true
     }
   ]
 }

@@ -18,9 +18,15 @@ import plotly.graph_objects as go
 
 @dataclass
 class ChartOptions:
-    """Styling / layout options applied to every figure builder."""
+    """Styling / layout options applied to every figure builder.
+
+    When ``show_shape`` is True the matrix shape is displayed as ``rows×cols``:
+    appended to the figure title for 2D builders, and to the trace name for 3D
+    surfaces (one 3D figure can hold several datasets of different shapes).
+    """
 
     title: str = ""
+    show_shape: bool = True
     font_family: str = "Arial"
     font_size: int = 12
     title_font_size: int = 16
@@ -49,11 +55,21 @@ def _as_2d_float(values) -> np.ndarray:
     return arr
 
 
-def _apply_layout(fig: go.Figure, options: ChartOptions, is_3d: bool = False) -> go.Figure:
-    """Apply common ChartOptions (title, fonts, ticks, size) to a figure layout."""
+def _with_shape(label: str, arr: np.ndarray) -> str:
+    """Append " (rows×cols)" of *arr* to label; bare "rows×cols" if label is empty."""
+    shape = f"{arr.shape[0]}×{arr.shape[1]}"
+    return f"{label} ({shape})" if label else shape
+
+
+def _apply_layout(fig: go.Figure, options: ChartOptions, is_3d: bool = False,
+                  title: Optional[str] = None) -> go.Figure:
+    """Apply common ChartOptions (title, fonts, ticks, size) to a figure layout.
+
+    ``title`` overrides ``options.title`` when given (used for shape suffixes).
+    """
     layout_kwargs = dict(
         title=dict(
-            text=options.title,
+            text=options.title if title is None else title,
             font=dict(size=options.title_font_size, family=options.font_family),
         ),
         font=dict(family=options.font_family, size=options.font_size),
@@ -127,7 +143,8 @@ def contour_2d(values, options: ChartOptions, name: str = "") -> go.Figure:
         trace.contours = contours
 
     fig = go.Figure(data=[trace])
-    return _apply_layout(fig, options, is_3d=False)
+    title = _with_shape(options.title, arr) if options.show_shape else None
+    return _apply_layout(fig, options, is_3d=False, title=title)
 
 
 def heatmap_2d(values, options: ChartOptions, name: str = "") -> go.Figure:
@@ -145,14 +162,22 @@ def heatmap_2d(values, options: ChartOptions, name: str = "") -> go.Figure:
         name=name,
     )
     fig = go.Figure(data=[trace])
-    return _apply_layout(fig, options, is_3d=False)
+    title = _with_shape(options.title, arr) if options.show_shape else None
+    return _apply_layout(fig, options, is_3d=False, title=title)
 
 
 def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 0.0) -> go.Figure:
-    """3D surface (go.Surface) with an optional constant z offset."""
+    """3D surface (go.Surface) with an optional constant z offset.
+
+    The shape suffix goes on the trace name (not the title) so figures holding
+    several surfaces of different shapes label each dataset individually.
+    """
     arr = _as_2d_float(values)
     z = arr + z_offset
     zmin, zmax = _z_bounds(options)
+
+    # legend visibility stays keyed on the caller-provided name
+    trace_name = _with_shape(name, arr) if options.show_shape else name
 
     trace = go.Surface(
         z=z,
@@ -161,7 +186,7 @@ def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 
         showscale=options.show_colorbar,
         cmin=zmin,
         cmax=zmax,
-        name=name,
+        name=trace_name,
         showlegend=bool(name),
     )
     fig = go.Figure(data=[trace])

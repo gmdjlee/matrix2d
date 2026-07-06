@@ -61,6 +61,26 @@ def test_resize_preserves_blank_region():
     assert not np.isnan(out[0, 0])
 
 
+def test_resize_downscale_preserves_blank_region():
+    a = np.ones((20, 20), dtype=np.float64)
+    a[8:12, 8:12] = np.nan
+    out = resize_matrix(a, (10, 10))
+    # Center should still be blank.
+    assert np.isnan(out[4:6, 4:6]).all()
+    # Corners (valid) should still be valid.
+    assert not np.isnan(out[0, 0])
+
+
+def test_resize_downscale_mask_scales_proportionally():
+    a = np.ones((40, 40), dtype=np.float64)
+    # Central 20x20 hole -> blank fraction = 400/1600 = 0.25.
+    a[10:30, 10:30] = np.nan
+    frac_in = np.isnan(a).mean()
+    out = resize_matrix(a, (20, 20))
+    frac_out = np.isnan(out).mean()
+    assert abs(frac_out - frac_in) < 0.03
+
+
 def test_resize_all_blank_raises():
     a = np.full((4, 4), np.nan)
     with pytest.raises(ValueError):
