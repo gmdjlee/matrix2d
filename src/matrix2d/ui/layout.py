@@ -297,6 +297,12 @@ def _tab_gap() -> html.Div:
             html.Div(id="gap-progress-bar", className="progress-inner"),
         ]),
         html.Div(id="gap-progress-label", className="status"),
+        # progress bar for the background batch image export; polled by the
+        # root-level export-all-progress-interval (same reasoning as above)
+        html.Div(className="progress-outer", children=[
+            html.Div(id="export-all-progress-bar", className="progress-inner"),
+        ]),
+        html.Div(id="export-all-progress-label", className="status"),
         html.Div(id="export-all-status", className="status"),
         html.Div(id="gap-error", className="error"),
         # charts on the left, result list on the right (table scrolls itself)
@@ -336,6 +342,10 @@ def build_layout() -> html.Div:
         # Gap tab) so that leaving the tab while a compute runs cannot pause
         # or kill the polling that publishes the results.
         dcc.Interval(id="gap-progress-interval", interval=400, disabled=True),
+
+        # poller for the background batch image export, same root-level
+        # placement rationale as gap-progress-interval above.
+        dcc.Interval(id="export-all-progress-interval", interval=400, disabled=True),
 
         # ---- sidebar ----
         html.Div(className="sidebar", children=[

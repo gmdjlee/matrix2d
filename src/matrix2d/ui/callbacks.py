@@ -21,7 +21,7 @@ import traceback
 from typing import List, Optional
 
 import numpy as np
-from dash import ALL, Input, Output, State, dcc, html, no_update
+from dash import ALL, Input, Output, State, dash_table, dcc, html, no_update
 
 from matrix2d.ui import charts, helpers
 from matrix2d.ui.dialogs import pick_folder
@@ -54,6 +54,18 @@ _SCAN = {
     "total": 0,
     "result": None,    # {"TOP": [...], "BTM": [...], "GAP": [...]} of dicts
     "errors": None,    # list of error strings
+}
+
+# Background batch-image-export state, mirroring the two patterns above. The
+# "Save All Images" button starts a worker thread; a dcc.Interval polls this
+# dict to drive the export progress bar and publish the final status string.
+_EXPORT_LOCK = threading.Lock()
+_EXPORT = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "result": None,    # status string on success
+    "error": None,     # traceback string on failure
 }
 
 # NOTE on the polling contract: the worker's outcome (result/error) is kept in
@@ -693,12 +705,18 @@ def register_callbacks(app):
         gap_opts = _meta_opts("GAP")  # scanned GAP folder files
         for s in store_gaps or []:    # computed gap results
             name = s.get("out_name", "")
-            parsed = helpers.parse_gap_name(name)
-            if parsed:
-                if f_samples and not (parsed["top_no"] in f_samples
-                                      or parsed["btm_no"] in f_samples):
+            # prefer fields precomputed by poll_compute; fall back to parsing
+            # for older stored data that predates the precomputed keys.
+            top_no, btm_no, temp_c = s.get("top_no"), s.get("btm_no"), s.get("temp_c")
+            if top_no is None or btm_no is None or temp_c is None:
+                parsed = helpers.parse_gap_name(name)
+                if parsed:
+                    top_no, btm_no, temp_c = \
+                        parsed["top_no"], parsed["btm_no"], parsed["temp_c"]
+            if top_no is not None and btm_no is not None and temp_c is not None:
+                if f_samples and not (top_no in f_samples or btm_no in f_samples):
                     continue
-                if f_temps and parsed["temp_c"] not in f_temps:
+                if f_temps and temp_c not in f_temps:
                     continue
             gap_opts.append({"label": "GAP " + name, "value": _gap_key(name)})
 
@@ -961,10 +979,12 @@ def register_callbacks(app):
                     True, False, no_update, no_update, no_update)
         logger.info("Compute poll: publishing %d result(s) to UI", len(results))
 
-        rows = []
         summaries = []
         for r in results:
             job = r.job
+            # parsed once here so downstream callbacks (3D dataset options)
+            # don't re-run the gap-name regex on every render.
+            parsed = helpers.parse_gap_name(job.out_name)
             summaries.append({
                 "out_name": job.out_name,
                 "top": os.path.basename(getattr(job.top, "path", "")),
@@ -972,21 +992,38 @@ def register_callbacks(app):
                 "phase": job.phase,
                 "offset": r.result.offset,
                 "out_path": r.out_path,
+                "top_no": parsed["top_no"] if parsed else None,
+                "btm_no": parsed["btm_no"] if parsed else None,
+                "temp_c": parsed["temp_c"] if parsed else None,
             })
 
-        header = html.Tr([html.Th(c) for c in
-                          ["out_name", "top", "btm", "phase", "offset", "saved path"]])
-        for s in summaries:
-            rows.append(html.Tr([
-                html.Td(s["out_name"]),
-                html.Td(s["top"]),
-                html.Td(s["btm"]),
-                html.Td(s["phase"]),
-                html.Td("{:.4g}".format(s["offset"]) if s["offset"] is not None else ""),
-                html.Td(s["out_path"]),
-            ]))
-        table = html.Table([html.Thead(header), html.Tbody(rows)],
-                           className="result-table")
+        table_data = [{
+            "out_name": s["out_name"],
+            "top": s["top"],
+            "btm": s["btm"],
+            "phase": s["phase"],
+            "offset": "{:.4g}".format(s["offset"]) if s["offset"] is not None else "",
+            "out_path": s["out_path"],
+        } for s in summaries]
+        table = dash_table.DataTable(
+            columns=[
+                {"name": "out_name", "id": "out_name"},
+                {"name": "top", "id": "top"},
+                {"name": "btm", "id": "btm"},
+                {"name": "phase", "id": "phase"},
+                {"name": "offset", "id": "offset"},
+                {"name": "saved path", "id": "out_path"},
+            ],
+            data=table_data,
+            page_size=50,
+            sort_action="native",
+            filter_action="native",
+            fixed_rows={"headers": True},
+            style_table={"overflowX": "auto"},
+            style_cell={"textAlign": "left", "padding": "6px 8px",
+                       "fontSize": "12px", "whiteSpace": "nowrap"},
+            style_header={"backgroundColor": "#eef2f7", "fontWeight": "bold"},
+        )
 
         result_opts = [{"label": s["out_name"], "value": _gap_key(s["out_name"])}
                        for s in summaries]
@@ -1083,8 +1120,64 @@ def register_callbacks(app):
         return _export(fig_dict, out_dir, "chart_3d.png")
 
     # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
+    #    Runs in a background thread (2*N kaleido renders would otherwise
+    #    block the UI for large gap counts); a dcc.Interval polls the shared
+    #    _EXPORT state to drive the progress bar and publish the final status,
+    #    mirroring the scan/compute pattern above (same polling contract).
+    def _export_all_worker(store_gaps, out_dir, chart_type, opts):
+        total = len(store_gaps)
+        with _EXPORT_LOCK:
+            _EXPORT["total"] = total
+        logger.info("Batch image export started: %d gap(s) -> %r",
+                    total, out_dir)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            saved = 0
+            failed = []
+            for i, s in enumerate(store_gaps):
+                name = s.get("out_name", "")
+                values = helpers.get_gap(name)
+                if values is None:
+                    failed.append(name + " (not in cache)")
+                else:
+                    stem = os.path.splitext(name)[0]
+                    gap_opts = dataclasses.replace(
+                        opts, title=opts.title or "GAP " + name)
+                    try:
+                        if chart_type == "heatmap":
+                            fig2d = charts.heatmap_2d(values, gap_opts)
+                        else:
+                            fig2d = charts.contour_2d(values, gap_opts)
+                        fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"))
+                        fig3d = charts.surface_3d(values, gap_opts, name=name)
+                        fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))
+                        saved += 2
+                    except Exception as exc:  # noqa: BLE001 - keep exporting the rest
+                        logger.exception("Batch image export failed for %r", name)
+                        failed.append("{0} ({1})".format(name, exc))
+                with _EXPORT_LOCK:
+                    _EXPORT["done"] = i + 1
+            msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
+            logger.info("Batch image export finished: %d saved, %d failed -> %s",
+                        saved, len(failed), out_dir)
+            if failed:
+                msg += " Failed: " + ", ".join(failed)
+            with _EXPORT_LOCK:
+                _EXPORT["result"] = msg
+        except Exception:  # noqa: BLE001 - never lose the outcome
+            logger.exception("Batch image export worker crashed")
+            with _EXPORT_LOCK:
+                _EXPORT["error"] = traceback.format_exc(limit=3)
+        finally:
+            with _EXPORT_LOCK:
+                _EXPORT["running"] = False
+
     @app.callback(
+        Output("export-all-progress-interval", "disabled"),
+        Output("btn-export-all-gaps", "disabled"),
         Output("export-all-status", "children"),
+        Output("export-all-progress-bar", "style"),
+        Output("export-all-progress-label", "children"),
         Input("btn-export-all-gaps", "n_clicks"),
         [State("store-gaps", "data"),
          State("folder-out", "value"),
@@ -1092,42 +1185,58 @@ def register_callbacks(app):
         + _OPTION_STATES,
         prevent_initial_call=True,
     )
-    def export_all_gaps(_n, store_gaps, out_dir, chart_type, *option_values):
+    def start_export_all(_n, store_gaps, out_dir, chart_type, *option_values):
         if not store_gaps:
-            return "No computed gaps to export — run Compute All Gaps first."
+            return (True, False,
+                    "No computed gaps to export — run Compute All Gaps first.",
+                    {"width": "0%"}, "")
         if not out_dir:
-            return "Set an OUT folder first."
+            return True, False, "Set an OUT folder first.", {"width": "0%"}, ""
         opts = _build_options(*option_values)
-        saved = 0
-        failed = []
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except OSError as exc:
-            return "Export error: {0}".format(exc)
-        for s in store_gaps:
-            name = s.get("out_name", "")
-            values = helpers.get_gap(name)
-            if values is None:
-                failed.append(name + " (not in cache)")
-                continue
-            stem = os.path.splitext(name)[0]
-            gap_opts = dataclasses.replace(
-                opts, title=opts.title or "GAP " + name)
-            try:
-                if chart_type == "heatmap":
-                    fig2d = charts.heatmap_2d(values, gap_opts)
-                else:
-                    fig2d = charts.contour_2d(values, gap_opts)
-                fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"))
-                fig3d = charts.surface_3d(values, gap_opts, name=name)
-                fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))
-                saved += 2
-            except Exception as exc:  # noqa: BLE001 - keep exporting the rest
-                logger.exception("Batch image export failed for %r", name)
-                failed.append("{0} ({1})".format(name, exc))
-        msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
-        logger.info("Batch image export: %d saved, %d failed -> %s",
-                    saved, len(failed), out_dir)
-        if failed:
-            msg += " Failed: " + ", ".join(failed)
-        return msg
+        with _EXPORT_LOCK:
+            if _EXPORT["running"]:
+                logger.info("Export-all request ignored: already running")
+                return no_update, no_update, no_update, no_update, no_update
+            _EXPORT.update(running=True, done=0, total=0,
+                           result=None, error=None)
+        threading.Thread(
+            target=_export_all_worker,
+            args=(store_gaps, out_dir, chart_type, opts),
+            name="export-all-worker",
+            daemon=True,
+        ).start()
+        return False, True, "", {"width": "0%"}, "Exporting..."
+
+    @app.callback(
+        Output("export-all-status", "children", allow_duplicate=True),
+        Output("export-all-progress-interval", "disabled", allow_duplicate=True),
+        Output("btn-export-all-gaps", "disabled", allow_duplicate=True),
+        Output("export-all-progress-bar", "style", allow_duplicate=True),
+        Output("export-all-progress-label", "children", allow_duplicate=True),
+        Input("export-all-progress-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def poll_export_all(_n):
+        with _EXPORT_LOCK:
+            running = _EXPORT["running"]
+            done, total = _EXPORT["done"], _EXPORT["total"]
+            result, error = _EXPORT["result"], _EXPORT["error"]
+
+        pct = (100.0 * done / total) if total else 0.0
+        bar = {"width": "{0:.0f}%".format(pct)}
+        label = ("{0} / {1} gaps".format(done, total) if total
+                 else "Exporting...")
+
+        if running:
+            return no_update, no_update, no_update, bar, label
+
+        if error is not None:
+            logger.error("Export-all poll: publishing error to UI:\n%s", error)
+            return "Export error: " + error, True, False, bar, "Failed"
+        if result is None:
+            # no outcome pending (e.g. a tick right after a fresh page load)
+            logger.debug("Export-all poll: no pending outcome, disabling interval")
+            return no_update, True, False, no_update, no_update
+        logger.info("Export-all poll: publishing result to UI")
+        return (result, True, False, {"width": "100%"},
+                "{0} / {0} gaps — done".format(total))

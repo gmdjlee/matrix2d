@@ -228,27 +228,6 @@ body {
     border-radius: 6px;
 }
 
-.result-table {
-    border-collapse: collapse;
-    width: 100%;
-    font-size: 12px;
-}
-
-.result-table th,
-.result-table td {
-    border: 1px solid var(--border);
-    padding: 6px 8px;
-    text-align: left;
-    white-space: nowrap;
-}
-
-.result-table th {
-    background: #eef2f7;
-    position: sticky;
-    top: 0;
-    z-index: 1;
-}
-
 /* ---- gap tab split: charts left, result list right ---- */
 .gap-split {
     display: flex;

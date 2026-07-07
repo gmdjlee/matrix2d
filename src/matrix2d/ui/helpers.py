@@ -237,19 +237,25 @@ def transformed_matrix(meta_dict: dict, config: Optional[TransformConfig]
 
 # ---------------------------------------------------------------------------
 # Matrix caches.
-#   _MATRIX_CACHE: keyed by file path -> ndarray (loaded input datasets)
+#   _MATRIX_CACHE: keyed by file path -> ndarray (loaded input datasets),
+#     bounded to the last few accessed so 1000+ file sessions don't grow this
+#     without limit (see get_matrix/load_matrix).
 #   _GAP_PATHS / _GAP_LRU: keyed by out_name -> saved OUT path / lazy-loaded
 #     ndarray, bounded to the last few accessed (see register_gap/get_gap).
 # ---------------------------------------------------------------------------
 
-_MATRIX_CACHE = {}  # type: Dict[str, np.ndarray]
+_MATRIX_CACHE = OrderedDict()  # type: "OrderedDict[str, np.ndarray]"  # bounded array cache
+_MATRIX_CACHE_MAX = 64
 _GAP_PATHS = {}          # type: Dict[str, str]  # out_name -> saved OUT file path
 _GAP_LRU = OrderedDict()  # type: "OrderedDict[str, np.ndarray]"  # bounded array cache
 _GAP_LRU_MAX = 8
 
 
 def get_matrix(path: str) -> Optional[np.ndarray]:
-    return _MATRIX_CACHE.get(path)
+    arr = _MATRIX_CACHE.get(path)
+    if arr is not None:
+        _MATRIX_CACHE.move_to_end(path)
+    return arr
 
 
 def load_matrix(meta_dict: dict) -> np.ndarray:
@@ -259,11 +265,15 @@ def load_matrix(meta_dict: dict) -> np.ndarray:
     """
     path = meta_dict["path"]
     if path in _MATRIX_CACHE:
+        _MATRIX_CACHE.move_to_end(path)
         return _MATRIX_CACHE[path]
     from matrix2d.services.repository import load_data
     data = load_data(meta_from_dict(meta_dict))
     arr = np.asarray(data.values, dtype="float64")
     _MATRIX_CACHE[path] = arr
+    _MATRIX_CACHE.move_to_end(path)
+    while len(_MATRIX_CACHE) > _MATRIX_CACHE_MAX:
+        _MATRIX_CACHE.popitem(last=False)
     return arr
 
 
