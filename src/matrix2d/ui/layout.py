@@ -263,6 +263,11 @@ def _tab_3d() -> html.Div:
                 dcc.Dropdown(id="view3d-gap", options=[], multi=True,
                              placeholder="scan / compute first"),
             ]),
+            html.Div(className="field grow", children=[
+                html.Label("OUT datasets"),
+                dcc.Dropdown(id="view3d-out", options=[], multi=True,
+                             placeholder="scan first"),
+            ]),
         ]),
         # per-dataset z-offset inputs are injected here by a pattern-matching callback
         html.Div(id="view3d-offsets", className="offsets"),
@@ -335,7 +340,7 @@ def _tab_gap() -> html.Div:
 def build_layout() -> html.Div:
     return html.Div(className="app-root", children=[
         # ---- stores ----
-        dcc.Store(id="store-metas", data={"TOP": [], "BTM": [], "GAP": []}),
+        dcc.Store(id="store-metas", data={"TOP": [], "BTM": [], "GAP": [], "OUT": []}),
         dcc.Store(id="store-gaps", data=[]),  # list of result summary dicts
 
         # poller for the background gap compute. Lives at the root (not in the

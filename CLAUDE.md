@@ -109,7 +109,13 @@ charts.py stays Dash-free so it ports directly to the React migration.
   radio (`data-show-resized`) live in the Data Options panel. "Resized"
   previews data exactly as the pipeline consumes it: 2D resizes the
   non-reference side of the selected pair; 3D brings all selected TOP/BTM
-  datasets onto one reference grid (GAP surfaces untouched).
+  datasets onto one reference grid (GAP/OUT surfaces untouched).
+- Scan reads TOP/BTM/GAP/OUT folders; each folder's metas go in its own
+  `store-metas` bucket. OUT files use the gap output naming, so they are
+  parsed with the GAP format (`scan_folder(out_dir, "GAP")`) but kept under
+  the "OUT" key. The 3D View tab exposes them in a dedicated "OUT datasets"
+  dropdown (`view3d-out`) alongside TOP/BTM/GAP; they render as untransformed
+  gap surfaces exactly like scanned GAP files.
 - Gap compute runs in a background thread (module-level `_COMPUTE` state in
   callbacks.py, guarded by a Lock); a 400ms `dcc.Interval` polls it to drive
   the progress bar and publishes results when done (duplicate outputs use

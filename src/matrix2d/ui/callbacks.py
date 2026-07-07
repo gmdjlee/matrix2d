@@ -194,7 +194,7 @@ def _gap_key(out_name: str) -> str:
 
 def _all_meta_dicts(store_metas) -> List[dict]:
     out = []
-    for kind in ("TOP", "BTM", "GAP"):
+    for kind in ("TOP", "BTM", "GAP", "OUT"):
         out.extend((store_metas or {}).get(kind, []))
     return out
 
@@ -368,49 +368,53 @@ def register_callbacks(app):
     #    metas. Dropdown options are derived reactively from the store by the
     #    callbacks below. Mirrors the gap-compute pattern.
     # -------------------------------------------------------------------
-    def _scan_worker(top_dir, btm_dir, gap_dir):
+    def _scan_worker(top_dir, btm_dir, gap_dir, out_dir):
         from matrix2d.services.repository import list_data_files, scan_folder
 
-        result = {"TOP": [], "BTM": [], "GAP": []}
+        result = {"TOP": [], "BTM": [], "GAP": [], "OUT": []}
         errors = []
-        specs = [("TOP", top_dir), ("BTM", btm_dir), ("GAP", gap_dir)]
+        # (store key, parse kind, folder). OUT files use the gap output naming,
+        # so they parse with the GAP format while staying in their own bucket.
+        specs = [("TOP", "TOP", top_dir), ("BTM", "BTM", btm_dir),
+                 ("GAP", "GAP", gap_dir), ("OUT", "GAP", out_dir)]
 
-        logger.info("Scan started: TOP=%r BTM=%r GAP=%r",
-                    top_dir, btm_dir, gap_dir)
+        logger.info("Scan started: TOP=%r BTM=%r GAP=%r OUT=%r",
+                    top_dir, btm_dir, gap_dir, out_dir)
 
         # pre-count files across all set folders for one grand total
-        active = [(k, f) for k, f in specs if f]
+        active = [(k, pk, f) for k, pk, f in specs if f]
         try:
             grand_total = 0
             offsets = {}
-            for kind, folder in active:
-                offsets[kind] = grand_total
+            for key, _pk, folder in active:
+                offsets[key] = grand_total
                 try:
                     grand_total += len(list_data_files(folder))
                 except Exception:  # noqa: BLE001 - count failure -> scan reports it
                     logger.warning("Scan pre-count failed for %s folder %r",
-                                   kind, folder, exc_info=True)
+                                   key, folder, exc_info=True)
             with _SCAN_LOCK:
                 _SCAN["total"] = grand_total
 
-            for kind, folder in active:
-                offset = offsets.get(kind, 0)
+            for key, parse_kind, folder in active:
+                offset = offsets.get(key, 0)
 
                 def _on_progress(done, _total, _offset=offset):
                     with _SCAN_LOCK:
                         _SCAN["done"] = _offset + done
 
                 try:
-                    metas = scan_folder(folder, kind, progress_cb=_on_progress)
-                    result[kind] = [helpers.meta_to_dict(m) for m in metas]
+                    metas = scan_folder(folder, parse_kind,
+                                        progress_cb=_on_progress)
+                    result[key] = [helpers.meta_to_dict(m) for m in metas]
                     if not metas:
                         # invalid-format files are skipped during scan, so an
                         # empty result means the folder holds no usable data.
                         errors.append(
-                            "{0}: 데이터 없음 (no valid data files)".format(kind))
+                            "{0}: 데이터 없음 (no valid data files)".format(key))
                 except Exception as exc:  # noqa: BLE001 - surface any core error
-                    logger.exception("Scan failed for %s folder %r", kind, folder)
-                    errors.append("{kind}: {exc}".format(kind=kind, exc=exc))
+                    logger.exception("Scan failed for %s folder %r", key, folder)
+                    errors.append("{key}: {exc}".format(key=key, exc=exc))
         except Exception as exc:  # noqa: BLE001 - never lose the outcome
             # Without this, an unexpected error would kill the thread before
             # "result" is published and the UI would wait forever.
@@ -421,9 +425,9 @@ def register_callbacks(app):
                 _SCAN["result"] = result
                 _SCAN["errors"] = errors
                 _SCAN["running"] = False
-            logger.info("Scan finished: TOP=%d BTM=%d GAP=%d, %d error(s)",
+            logger.info("Scan finished: TOP=%d BTM=%d GAP=%d OUT=%d, %d error(s)",
                         len(result["TOP"]), len(result["BTM"]),
-                        len(result["GAP"]), len(errors))
+                        len(result["GAP"]), len(result["OUT"]), len(errors))
 
     @app.callback(
         Output("scan-progress-interval", "disabled"),
@@ -434,12 +438,13 @@ def register_callbacks(app):
         State("folder-top", "value"),
         State("folder-btm", "value"),
         State("folder-gap", "value"),
+        State("folder-out", "value"),
         prevent_initial_call=True,
     )
-    def start_scan(_n, top_dir, btm_dir, gap_dir):
-        if not top_dir and not btm_dir and not gap_dir:
+    def start_scan(_n, top_dir, btm_dir, gap_dir, out_dir):
+        if not top_dir and not btm_dir and not gap_dir and not out_dir:
             return (True, False, {"width": "0%"},
-                    "Set at least one of TOP / BTM / GAP folders.")
+                    "Set at least one of TOP / BTM / GAP / OUT folders.")
         with _SCAN_LOCK:
             if _SCAN["running"]:
                 logger.info("Scan request ignored: a scan is already running")
@@ -448,7 +453,7 @@ def register_callbacks(app):
                          result=None, errors=None)
         threading.Thread(
             target=_scan_worker,
-            args=(top_dir, btm_dir, gap_dir),
+            args=(top_dir, btm_dir, gap_dir, out_dir),
             name="scan-worker",
             daemon=True,
         ).start()
@@ -486,7 +491,8 @@ def register_callbacks(app):
         logger.info("Scan poll: publishing result to UI (%d error(s))",
                     len(errors or []))
         counts = "  ".join(
-            "{k}={n}".format(k=k, n=len(result[k])) for k in ("TOP", "BTM", "GAP")
+            "{k}={n}".format(k=k, n=len(result.get(k, [])))
+            for k in ("TOP", "BTM", "GAP", "OUT")
         )
         status_children = [html.Span("Scanned: " + counts)]
         if errors:
@@ -663,9 +669,11 @@ def register_callbacks(app):
         Output("view3d-top", "options"),
         Output("view3d-btm", "options"),
         Output("view3d-gap", "options"),
+        Output("view3d-out", "options"),
         Output("view3d-top", "value"),
         Output("view3d-btm", "value"),
         Output("view3d-gap", "value"),
+        Output("view3d-out", "value"),
         Input("store-metas", "data"),
         Input("store-gaps", "data"),
         Input("view3d-filter-sample", "value"),
@@ -673,10 +681,11 @@ def register_callbacks(app):
         State("view3d-top", "value"),
         State("view3d-btm", "value"),
         State("view3d-gap", "value"),
+        State("view3d-out", "value"),
         prevent_initial_call=True,
     )
     def update_3d_dataset_options(store_metas, store_gaps, f_samples, f_temps,
-                                  cur_top, cur_btm, cur_gap):
+                                  cur_top, cur_btm, cur_gap, cur_out):
         f_samples = set(f_samples or [])
         f_temps = set(f_temps or [])
 
@@ -731,10 +740,11 @@ def register_callbacks(app):
         def _prune(cur, valid):
             return [v for v in (cur or []) if v in valid]
 
-        return (_meta_opts("TOP"), _meta_opts("BTM"), gap_opts,
+        return (_meta_opts("TOP"), _meta_opts("BTM"), gap_opts, _meta_opts("OUT"),
                 _prune(cur_top, _valid_meta_keys("TOP")),
                 _prune(cur_btm, _valid_meta_keys("BTM")),
-                _prune(cur_gap, valid_gap))
+                _prune(cur_gap, valid_gap),
+                _prune(cur_out, _valid_meta_keys("OUT")))
 
     # 3b. per-dataset z-offset inputs (pattern-matching). Existing values are
     # carried over so editing the selection does not wipe user-entered offsets.
@@ -743,18 +753,20 @@ def register_callbacks(app):
         Input("view3d-top", "value"),
         Input("view3d-btm", "value"),
         Input("view3d-gap", "value"),
+        Input("view3d-out", "value"),
         State({"type": "z-offset", "key": ALL}, "value"),
         State({"type": "z-offset", "key": ALL}, "id"),
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def build_offset_inputs(top_keys, btm_keys, gap_keys,
+    def build_offset_inputs(top_keys, btm_keys, gap_keys, out_keys,
                             prev_values, prev_ids, store_metas):
         prev = {}
         for oid, oval in zip(prev_ids or [], prev_values or []):
             prev[oid["key"]] = oval
         rows = []
-        for key in (top_keys or []) + (btm_keys or []) + (gap_keys or []):
+        for key in ((top_keys or []) + (btm_keys or [])
+                    + (gap_keys or []) + (out_keys or [])):
             label = _key_label(key, store_metas)
             rows.append(html.Div(className="offset-row", children=[
                 html.Span(label, className="offset-label"),
@@ -773,6 +785,7 @@ def register_callbacks(app):
         [Input("view3d-top", "value"),
          Input("view3d-btm", "value"),
          Input("view3d-gap", "value"),
+         Input("view3d-out", "value"),
          Input("data-show-resized", "value"),
          Input("gap-reference", "value"),
          Input("store-gaps", "data"),  # recompute -> re-render gap surfaces
@@ -782,13 +795,13 @@ def register_callbacks(app):
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
-    def render_3d(top_keys, btm_keys, gap_keys, show_resized, reference,
+    def render_3d(top_keys, btm_keys, gap_keys, out_keys, show_resized, reference,
                   _store_gaps, offset_values, offset_ids, *rest):
         option_values = rest[:len(_OPTION_STATES)]
         transform_values = rest[len(_OPTION_STATES):-1]
         store_metas = rest[-1]
         selections = [("TOP", top_keys or []), ("BTM", btm_keys or []),
-                      ("GAP", gap_keys or [])]
+                      ("GAP", gap_keys or []), ("OUT", out_keys or [])]
         if not any(keys for _k, keys in selections):
             return _empty_fig("Select datasets"), ""
         try:
