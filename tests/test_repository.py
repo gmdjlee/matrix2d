@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 
 from matrix2d.core.parser import load_matrix
-from matrix2d.services.repository import load_data, save_matrix, scan_folder
+from matrix2d.services.repository import (
+    list_data_files,
+    load_data,
+    save_matrix,
+    scan_folder,
+)
 
 
 def _write(p, text):
@@ -80,6 +85,35 @@ def test_scan_folder_all_extensions(tmp_path):
     (tmp_path / "A_PT0003_00011s(25C).txt").write_text("1\n")
     metas = scan_folder(str(tmp_path), "TOP")
     assert len(metas) == 3
+
+
+def test_list_data_files_sorted(tmp_path):
+    (tmp_path / "b_PT0002_00011s(25C).dat").write_text("1\n")
+    (tmp_path / "a_PT0001_00011s(25C).csv").write_text("1\n")
+    (tmp_path / "c_PT0003_00011s(25C).txt").write_text("1\n")
+    (tmp_path / "ignore.md").write_text("skip\n")
+    paths = list_data_files(str(tmp_path))
+    assert paths == sorted(paths)
+    assert len(paths) == 3
+    assert all(p.endswith((".dat", ".csv", ".txt")) for p in paths)
+
+
+def test_scan_folder_reports_progress(tmp_path):
+    # 2 valid + 1 invalid-name file -> 3 candidate files, all reported.
+    (tmp_path / "A_PT0001_00011s(25C).dat").write_text("1,2\n3,4\n")
+    (tmp_path / "A_PT0002_00060s(240C).csv").write_text("1,2\n3,4\n")
+    (tmp_path / "bad_name.txt").write_text("1\n")
+    calls = []
+
+    def _cb(done, total):
+        calls.append((done, total))
+
+    metas = scan_folder(str(tmp_path), "TOP", progress_cb=_cb)
+    assert len(metas) == 2  # invalid-name file skipped
+    assert calls[-1] == (3, 3)
+    dones = [c[0] for c in calls]
+    assert dones == sorted(dones)  # monotonically nondecreasing
+    assert all(c[1] == 3 for c in calls)
 
 
 def test_load_data(tmp_path):

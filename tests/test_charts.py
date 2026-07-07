@@ -166,6 +166,52 @@ def test_shape_reflects_coerced_array():
 
 
 # ---------------------------------------------------------------------------
+# aspect matching (chart sized to data shape)
+# ---------------------------------------------------------------------------
+
+def test_match_aspect_2d_on(sample):
+    for builder in (contour_2d, heatmap_2d):
+        fig = builder(sample, ChartOptions(match_aspect=True))
+        assert fig.layout.yaxis.scaleanchor == "x"
+        assert fig.layout.yaxis.scaleratio == 1
+
+
+def test_match_aspect_2d_off(sample):
+    for builder in (contour_2d, heatmap_2d):
+        fig = builder(sample, ChartOptions(match_aspect=False))
+        assert fig.layout.yaxis.scaleanchor is None
+
+
+def test_match_aspect_3d_surface():
+    arr = np.zeros((3, 6))  # 3 rows, 6 cols
+    fig = surface_3d(arr, ChartOptions(match_aspect=True))
+    assert fig.layout.scene.aspectmode == "manual"
+    assert fig.layout.scene.aspectratio.x == 1.0   # cols/max = 6/6
+    assert fig.layout.scene.aspectratio.y == 0.5   # rows/max = 3/6
+
+
+def test_match_aspect_3d_off():
+    arr = np.zeros((3, 6))
+    fig = surface_3d(arr, ChartOptions(match_aspect=False))
+    assert fig.layout.scene.aspectmode != "manual"
+
+
+def test_match_aspect_multi_surface_uses_max_shape():
+    items = [("a", np.zeros((2, 6)), 0.0), ("b", np.zeros((3, 4)), 0.0)]
+    fig = multi_surface_3d(items, ChartOptions(match_aspect=True))
+    # max rows = 3, max cols = 6 -> x=6/6=1.0, y=3/6=0.5
+    assert fig.layout.scene.aspectmode == "manual"
+    assert fig.layout.scene.aspectratio.x == 1.0
+    assert fig.layout.scene.aspectratio.y == 0.5
+
+
+def test_match_aspect_multi_surface_off():
+    items = [("a", np.zeros((2, 6)), 0.0)]
+    fig = multi_surface_3d(items, ChartOptions(match_aspect=False))
+    assert fig.layout.scene.aspectmode != "manual"
+
+
+# ---------------------------------------------------------------------------
 # NaN handling
 # ---------------------------------------------------------------------------
 

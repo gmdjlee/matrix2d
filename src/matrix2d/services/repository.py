@@ -15,7 +15,26 @@ logger = logging.getLogger(__name__)
 _SCAN_EXTS = ("*.dat", "*.csv", "*.txt")
 
 
-def scan_folder(folder: str, kind: str) -> "List[SampleMeta]":
+def list_data_files(folder: str) -> "List[str]":
+    """Return the sorted, deduped list of data-file paths in a folder.
+
+    Matches *.dat/*.csv/*.txt (case as globbed by the OS). Used by
+    :func:`scan_folder` and by callers that need a file count up front (e.g.
+    to size a scan progress bar).
+
+    Args:
+        folder: Directory to list.
+
+    Returns:
+        Sorted list of matching file paths.
+    """
+    paths: List[str] = []
+    for pattern in _SCAN_EXTS:
+        paths.extend(glob.glob(os.path.join(folder, pattern)))
+    return sorted(set(paths))
+
+
+def scan_folder(folder: str, kind: str, progress_cb=None) -> "List[SampleMeta]":
     """Scan a folder for parseable measurement files.
 
     Files matching *.dat/*.csv/*.txt are parsed; files whose NAME or CONTENT
@@ -26,23 +45,26 @@ def scan_folder(folder: str, kind: str) -> "List[SampleMeta]":
     Args:
         folder: Directory to scan.
         kind: "TOP" | "BTM" | "GAP".
+        progress_cb: Optional callable ``progress_cb(done, total)`` invoked
+            after each file is processed (done = files processed so far,
+            including skipped ones; total = number of candidate files).
 
     Returns:
         Sorted list of SampleMeta.
     """
-    paths: List[str] = []
-    for pattern in _SCAN_EXTS:
-        paths.extend(glob.glob(os.path.join(folder, pattern)))
-    paths = sorted(set(paths))
+    paths = list_data_files(folder)
+    total = len(paths)
 
     metas: List[SampleMeta] = []
-    for path in paths:
+    for done, path in enumerate(paths, start=1):
         try:
             meta = parse_data_filename(path, kind, path=path)
             load_matrix(path)  # content validation only; result discarded
             metas.append(meta)
         except (ValueError, OSError) as exc:
             logger.warning("Skipping invalid data file '%s': %s", path, exc)
+        if progress_cb is not None:
+            progress_cb(done, total)
     metas.sort(key=lambda m: (m.sample_no, m.time_s))
     return metas
 

@@ -23,10 +23,15 @@ class ChartOptions:
     When ``show_shape`` is True the matrix shape is displayed as ``rows×cols``:
     appended to the figure title for 2D builders, and to the trace name for 3D
     surfaces (one 3D figure can hold several datasets of different shapes).
+
+    When ``match_aspect`` is True the chart is sized to the data shape: 2D axes
+    get equal cell scaling (square cells), and the 3D scene x/y aspect follows
+    cols:rows.
     """
 
     title: str = ""
     show_shape: bool = True
+    match_aspect: bool = True
     font_family: str = "Arial"
     font_size: int = 12
     title_font_size: int = 16
@@ -110,6 +115,13 @@ def _z_bounds(options: ChartOptions):
     return options.zmin, options.zmax
 
 
+def _scene_aspect(rows: int, cols: int) -> dict:
+    """3D scene aspect dict sizing x/y to cols:rows (z kept shallow)."""
+    m = float(max(rows, cols, 1))
+    return dict(aspectmode="manual",
+                aspectratio=dict(x=cols / m, y=rows / m, z=0.6))
+
+
 # ---------------------------------------------------------------------------
 # public figure builders
 # ---------------------------------------------------------------------------
@@ -144,7 +156,11 @@ def contour_2d(values, options: ChartOptions, name: str = "") -> go.Figure:
 
     fig = go.Figure(data=[trace])
     title = _with_shape(options.title, arr) if options.show_shape else None
-    return _apply_layout(fig, options, is_3d=False, title=title)
+    fig = _apply_layout(fig, options, is_3d=False, title=title)
+    if options.match_aspect:
+        fig.update_yaxes(scaleanchor="x", scaleratio=1.0, constrain="domain")
+        fig.update_xaxes(constrain="domain")
+    return fig
 
 
 def heatmap_2d(values, options: ChartOptions, name: str = "") -> go.Figure:
@@ -163,7 +179,11 @@ def heatmap_2d(values, options: ChartOptions, name: str = "") -> go.Figure:
     )
     fig = go.Figure(data=[trace])
     title = _with_shape(options.title, arr) if options.show_shape else None
-    return _apply_layout(fig, options, is_3d=False, title=title)
+    fig = _apply_layout(fig, options, is_3d=False, title=title)
+    if options.match_aspect:
+        fig.update_yaxes(scaleanchor="x", scaleratio=1.0, constrain="domain")
+        fig.update_xaxes(constrain="domain")
+    return fig
 
 
 def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 0.0) -> go.Figure:
@@ -190,7 +210,10 @@ def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 
         showlegend=bool(name),
     )
     fig = go.Figure(data=[trace])
-    return _apply_layout(fig, options, is_3d=True)
+    fig = _apply_layout(fig, options, is_3d=True)
+    if options.match_aspect:
+        fig.update_layout(scene=_scene_aspect(*arr.shape))
+    return fig
 
 
 def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: ChartOptions) -> go.Figure:
@@ -205,9 +228,13 @@ def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: Char
     n = len(items)
     zmin, zmax = _z_bounds(options)
 
+    max_rows = 1
+    max_cols = 1
     for i, item in enumerate(items):
         name, values, z_offset = item
         arr = _as_2d_float(values)
+        max_rows = max(max_rows, arr.shape[0])
+        max_cols = max(max_cols, arr.shape[1])
         z = arr + z_offset
 
         surface = go.Surface(
@@ -234,4 +261,6 @@ def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: Char
 
     fig = _apply_layout(fig, options, is_3d=True)
     fig.update_layout(legend=dict(font=dict(size=options.font_size, family=options.font_family)))
+    if options.match_aspect:
+        fig.update_layout(scene=_scene_aspect(max_rows, max_cols))
     return fig

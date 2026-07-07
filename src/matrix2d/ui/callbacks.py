@@ -41,6 +41,18 @@ _COMPUTE = {
     "error": None,     # traceback string on failure (consumed by the poller)
 }
 
+# Background folder-scan state, mirroring the gap-compute pattern above. The
+# Scan button starts a worker thread; a dcc.Interval polls this dict to drive
+# the scan progress bar and publish the scanned metas once done.
+_SCAN_LOCK = threading.Lock()
+_SCAN = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "result": None,    # {"TOP": [...], "BTM": [...], "GAP": [...]} of dicts
+    "errors": None,    # list of error strings (consumed by the poller)
+}
+
 
 # ---------------------------------------------------------------------------
 # ChartOptions assembled from the sidebar controls (shared by all chart tabs).
@@ -69,6 +81,7 @@ def _build_options(title, font_family, font_size, title_size, tick_size,
         reverse_colorscale="reverse" in toggles,
         show_colorbar="colorbar" in toggles,
         show_shape="shape" in toggles,
+        match_aspect="aspect" in toggles,
         zmin=_float(zmin),
         zmax=_float(zmax),
         contour_levels=_int(contour_levels),
@@ -325,37 +338,115 @@ def register_callbacks(app):
             return path if path else no_update
 
     # -------------------------------------------------------------------
-    # 1. Scan folders -> store metas, show counts. Dropdown options are
-    #    derived reactively from the store by the callbacks below.
+    # 1. Scan folders -> store metas, show counts. The button starts a
+    #    background thread; a dcc.Interval polls the shared _SCAN state to
+    #    drive the progress bar and, when the scan finishes, publish the
+    #    metas. Dropdown options are derived reactively from the store by the
+    #    callbacks below. Mirrors the gap-compute pattern.
     # -------------------------------------------------------------------
+    def _scan_worker(top_dir, btm_dir, gap_dir):
+        from matrix2d.services.repository import list_data_files, scan_folder
+
+        result = {"TOP": [], "BTM": [], "GAP": []}
+        errors = []
+        specs = [("TOP", top_dir), ("BTM", btm_dir), ("GAP", gap_dir)]
+
+        # pre-count files across all set folders for one grand total
+        active = [(k, f) for k, f in specs if f]
+        try:
+            grand_total = 0
+            offsets = {}
+            for kind, folder in active:
+                offsets[kind] = grand_total
+                try:
+                    grand_total += len(list_data_files(folder))
+                except Exception:  # noqa: BLE001 - count failure -> scan reports it
+                    pass
+            with _SCAN_LOCK:
+                _SCAN["total"] = grand_total
+
+            for kind, folder in active:
+                offset = offsets.get(kind, 0)
+
+                def _on_progress(done, _total, _offset=offset):
+                    with _SCAN_LOCK:
+                        _SCAN["done"] = _offset + done
+
+                try:
+                    metas = scan_folder(folder, kind, progress_cb=_on_progress)
+                    result[kind] = [helpers.meta_to_dict(m) for m in metas]
+                    if not metas:
+                        # invalid-format files are skipped during scan, so an
+                        # empty result means the folder holds no usable data.
+                        errors.append(
+                            "{0}: 데이터 없음 (no valid data files)".format(kind))
+                except Exception as exc:  # noqa: BLE001 - surface any core error
+                    errors.append("{kind}: {exc}".format(kind=kind, exc=exc))
+
+            with _SCAN_LOCK:
+                _SCAN["result"] = result
+                _SCAN["errors"] = errors
+        finally:
+            with _SCAN_LOCK:
+                _SCAN["running"] = False
+
     @app.callback(
-        Output("store-metas", "data"),
-        Output("scan-status", "children"),
+        Output("scan-progress-interval", "disabled"),
+        Output("btn-scan", "disabled"),
+        Output("scan-progress-bar", "style"),
+        Output("scan-progress-label", "children"),
         Input("btn-scan", "n_clicks"),
         State("folder-top", "value"),
         State("folder-btm", "value"),
         State("folder-gap", "value"),
         prevent_initial_call=True,
     )
-    def scan_folders(_n, top_dir, btm_dir, gap_dir):
-        from matrix2d.services.repository import scan_folder
+    def start_scan(_n, top_dir, btm_dir, gap_dir):
+        if not top_dir and not btm_dir and not gap_dir:
+            return (True, False, {"width": "0%"},
+                    "Set at least one of TOP / BTM / GAP folders.")
+        with _SCAN_LOCK:
+            if _SCAN["running"]:
+                return no_update, no_update, no_update, no_update
+            _SCAN.update(running=True, done=0, total=0,
+                         result=None, errors=None)
+        threading.Thread(
+            target=_scan_worker,
+            args=(top_dir, btm_dir, gap_dir),
+            daemon=True,
+        ).start()
+        return False, True, {"width": "0%"}, "Scanning..."
 
-        result = {"TOP": [], "BTM": [], "GAP": []}
-        errors = []
-        specs = [("TOP", top_dir), ("BTM", btm_dir), ("GAP", gap_dir)]
-        for kind, folder in specs:
-            if not folder:
-                continue
-            try:
-                metas = scan_folder(folder, kind)
-                result[kind] = [helpers.meta_to_dict(m) for m in metas]
-                if not metas:
-                    # invalid-format files are skipped during scan, so an
-                    # empty result means the folder holds no usable data.
-                    errors.append(
-                        "{0}: 데이터 없음 (no valid data files)".format(kind))
-            except Exception as exc:  # noqa: BLE001 - surface any core error
-                errors.append("{kind}: {exc}".format(kind=kind, exc=exc))
+    @app.callback(
+        Output("store-metas", "data"),
+        Output("scan-status", "children"),
+        Output("scan-progress-interval", "disabled", allow_duplicate=True),
+        Output("btn-scan", "disabled", allow_duplicate=True),
+        Output("scan-progress-bar", "style", allow_duplicate=True),
+        Output("scan-progress-label", "children", allow_duplicate=True),
+        Input("scan-progress-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def poll_scan(_n):
+        with _SCAN_LOCK:
+            running = _SCAN["running"]
+            done, total = _SCAN["done"], _SCAN["total"]
+            result, errors = _SCAN["result"], _SCAN["errors"]
+            if not running:  # consume the outcome exactly once
+                _SCAN["result"] = None
+                _SCAN["errors"] = None
+
+        pct = (100.0 * done / total) if total else 0.0
+        bar = {"width": "{0:.0f}%".format(pct)}
+        label = ("{0} / {1} files".format(done, total) if total
+                 else "Scanning...")
+
+        if running:
+            return (no_update, no_update, no_update, no_update, bar, label)
+
+        if result is None:
+            # nothing pending (stale tick after the outcome was consumed)
+            return (no_update, no_update, True, False, no_update, no_update)
 
         counts = "  ".join(
             "{k}={n}".format(k=k, n=len(result[k])) for k in ("TOP", "BTM", "GAP")
@@ -365,7 +456,9 @@ def register_callbacks(app):
             status_children.append(
                 html.Div("Errors: " + " | ".join(errors), className="error"))
 
-        return result, status_children
+        return (result, status_children, True, False,
+                {"width": "100%"},
+                "{0} / {0} files — done".format(total))
 
     # -------------------------------------------------------------------
     # 2. 2D view: sample pickers -> common temperature picker -> two charts.
@@ -879,10 +972,11 @@ def register_callbacks(app):
         Output("gap-graph-2d", "figure"),
         Output("gap-graph-3d", "figure"),
         Output("gap-inspect-error", "children"),
-        [Input("gap-result-select", "value")] + _OPTION_INPUTS,
+        [Input("gap-result-select", "value"),
+         Input("gap-view-type", "value")] + _OPTION_INPUTS,
         prevent_initial_call=True,
     )
-    def inspect_gap(gap_key, *option_values):
+    def inspect_gap(gap_key, chart_type, *option_values):
         if not gap_key:
             return _empty_fig("Select a result"), _empty_fig("Select a result"), ""
         try:
@@ -893,7 +987,10 @@ def register_callbacks(app):
             name = gap_key[len("gap::"):]
             if not opts.title:
                 opts.title = "GAP " + name
-            fig2d = charts.contour_2d(values, opts)
+            if chart_type == "heatmap":
+                fig2d = charts.heatmap_2d(values, opts)
+            else:
+                fig2d = charts.contour_2d(values, opts)
             fig3d = charts.surface_3d(values, opts, name=name)
             return fig2d, fig3d, ""
         except Exception:  # noqa: BLE001
@@ -948,11 +1045,12 @@ def register_callbacks(app):
         Output("export-all-status", "children"),
         Input("btn-export-all-gaps", "n_clicks"),
         [State("store-gaps", "data"),
-         State("folder-out", "value")]
+         State("folder-out", "value"),
+         State("gap-view-type", "value")]
         + _OPTION_STATES,
         prevent_initial_call=True,
     )
-    def export_all_gaps(_n, store_gaps, out_dir, *option_values):
+    def export_all_gaps(_n, store_gaps, out_dir, chart_type, *option_values):
         if not store_gaps:
             return "No computed gaps to export — run Compute All Gaps first."
         if not out_dir:
@@ -974,7 +1072,10 @@ def register_callbacks(app):
             gap_opts = dataclasses.replace(
                 opts, title=opts.title or "GAP " + name)
             try:
-                fig2d = charts.contour_2d(values, gap_opts)
+                if chart_type == "heatmap":
+                    fig2d = charts.heatmap_2d(values, gap_opts)
+                else:
+                    fig2d = charts.contour_2d(values, gap_opts)
                 fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"))
                 fig3d = charts.surface_3d(values, gap_opts, name=name)
                 fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))

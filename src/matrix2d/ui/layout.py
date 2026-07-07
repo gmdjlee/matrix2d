@@ -50,6 +50,12 @@ def _folders_panel() -> html.Div:
             _folder_field("GAP"),
             _folder_field("OUT"),
             html.Button("Scan", id="btn-scan", n_clicks=0, className="btn btn-primary"),
+            # progress bar for the background scan; polled by the interval
+            html.Div(className="progress-outer", children=[
+                html.Div(id="scan-progress-bar", className="progress-inner"),
+            ]),
+            html.Div(id="scan-progress-label", className="status"),
+            dcc.Interval(id="scan-progress-interval", interval=300, disabled=True),
             html.Div(id="scan-status", className="status"),
         ],
     )
@@ -168,8 +174,9 @@ def _chart_options_panel() -> html.Div:
                                   {"label": " Reverse colorscale", "value": "reverse"},
                                   {"label": " Show colorbar", "value": "colorbar"},
                                   {"label": " Show shape", "value": "shape"},
+                                  {"label": " Match data aspect", "value": "aspect"},
                               ],
-                              value=["colorbar", "shape"], className="checklist"),
+                              value=["colorbar", "shape", "aspect"], className="checklist"),
             ]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
@@ -212,7 +219,7 @@ def _tab_2d() -> html.Div:
                 dcc.RadioItems(id="view2d-type",
                                options=[{"label": " Contour", "value": "contour"},
                                         {"label": " Heatmap", "value": "heatmap"}],
-                               value="contour", className="radio-inline"),
+                               value="heatmap", className="radio-inline"),
             ]),
         ]),
         html.Div(id="view2d-error", className="error"),
@@ -294,6 +301,13 @@ def _tab_gap() -> html.Div:
         # charts on the left, result list on the right (table scrolls itself)
         html.Div(className="gap-split", children=[
             html.Div(className="gap-left", children=[
+                html.Div(className="field", children=[
+                    html.Label("Chart type (2D)"),
+                    dcc.RadioItems(id="gap-view-type",
+                                   options=[{"label": " Contour", "value": "contour"},
+                                            {"label": " Heatmap", "value": "heatmap"}],
+                                   value="heatmap", className="radio-inline"),
+                ]),
                 html.Div(className="field", children=[
                     html.Label("Inspect a computed result"),
                     dcc.Dropdown(id="gap-result-select", options=[],
