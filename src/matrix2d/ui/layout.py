@@ -113,7 +113,7 @@ def _data_options_panel() -> html.Div:
             html.Div(className="field", children=[
                 html.Label("Reference size (resize target)"),
                 dcc.RadioItems(id="gap-reference",
-                               options=[{"label": " Auto (smaller → larger)",
+                               options=[{"label": " Auto (larger → smaller)",
                                          "value": "AUTO"},
                                         {"label": " TOP", "value": "TOP"},
                                         {"label": " BTM", "value": "BTM"}],

@@ -44,8 +44,9 @@ ui/       Dash: charts (plotly-only, Dash-free), layout, callbacks, app
 2. `compute_gap`: `gap = (top - btm) - nanmin(top - btm)`; min valid cell
    is exactly `0.0`. Shape mismatch or zero-overlap raises `ValueError`.
 3. Resize never distorts warpage: bilinear on values (linear ramp error
-   < 1e-6), nearest-neighbor on the blank mask, final mask unioned with the
-   reference dataset's mask.
+   < 1e-6), block resize on the blank mask (any source blank -> blank, so
+   blanks never shrink); each dataset keeps its own resized blank
+   (`mask_mode="own"`), not the reference's.
 4. Filename regex anchors on the **last** `_PT` — titles may contain `_`.
 5. Output naming: `TOP{n}-BTM{m}_{H|C}{temp}.txt`; H/C from peak-time rule
    (time <= peak-temperature time → H). Collisions get `_2`, `_3` suffix.

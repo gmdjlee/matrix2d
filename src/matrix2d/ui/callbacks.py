@@ -309,22 +309,22 @@ def _phase_label(entry: dict) -> str:
 def _resize_pair(top_vals, btm_vals, reference):
     """Resize the non-reference side of a TOP/BTM pair to the reference grid.
 
-    Same rules as run_pipeline: AUTO picks the larger element count (tie ->
-    TOP); the reference dataset's blank mask is authoritative.
+    Same rules as run_pipeline: AUTO picks the smaller element count (tie ->
+    TOP); each side keeps its own resized blank.
 
     Returns (top_vals, btm_vals, error_message).
     """
     from matrix2d.core.resize import resize_to_reference
 
     ref = reference if reference in ("TOP", "BTM") else (
-        "TOP" if top_vals.size >= btm_vals.size else "BTM")
+        "TOP" if top_vals.size <= btm_vals.size else "BTM")
     try:
         if ref == "TOP":
             btm_vals = resize_to_reference(btm_vals, top_vals,
-                                           mask_mode="reference")
+                                           mask_mode="own")
         else:
             top_vals = resize_to_reference(top_vals, btm_vals,
-                                           mask_mode="reference")
+                                           mask_mode="own")
     except ValueError as exc:
         return top_vals, btm_vals, "Resize failed: {0}".format(exc)
     return top_vals, btm_vals, ""
@@ -335,14 +335,14 @@ def _pick_reference_record(records, reference):
 
     Explicit TOP/BTM restricts the pool to that kind (falls back to all
     input records when the kind is not selected); AUTO uses every input
-    record. Largest element count wins, ties prefer TOP.
+    record. Smallest element count wins, ties prefer TOP.
     """
     pool = records
     if reference in ("TOP", "BTM"):
         of_kind = [r for r in records if r["kind"] == reference]
         if of_kind:
             pool = of_kind
-    return max(pool, key=lambda r: (r["values"].size, r["kind"] == "TOP"))
+    return min(pool, key=lambda r: (r["values"].size, r["kind"] != "TOP"))
 
 
 def register_callbacks(app):
@@ -846,7 +846,7 @@ def register_callbacks(app):
                         try:
                             r["values"] = resize_to_reference(
                                 r["values"], ref["values"],
-                                mask_mode="reference")
+                                mask_mode="own")
                         except ValueError as exc:
                             problems.append("{0} (resize: {1})".format(
                                 _key_label(r["key"], store_metas), exc))

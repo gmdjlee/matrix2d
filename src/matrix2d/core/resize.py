@@ -7,8 +7,8 @@ Approach:
   a flat plane or linear ramp is preserved to machine precision.
 - Before interpolating, NaN (blank) cells are filled by nearest-valid values so
   interpolation near a blank edge does not bleed NaN into valid neighbours.
-- The blank mask is resized independently with nearest-neighbour (order 0) so the
-  blank region scales proportionally and lands exactly on the target grid; it is
+- The blank mask is resized independently by block: a target cell is blank if
+  ANY source cell in its footprint is blank, so blanks never shrink; it is
   then re-applied to the interpolated values.
 """
 
@@ -67,29 +67,66 @@ def _resize_filled(filled: np.ndarray, target_shape: Tuple[int, int]) -> np.ndar
     return out.astype(np.float64, copy=False)
 
 
+def _blank_bins(src_n, tgt_n):
+    """Per target-index inclusive source-index range ``[lo, hi]``.
+
+    Each target cell pools every source cell whose center falls in its
+    footprint (always >= 1 cell). Downscale -> wide ranges so a blank grows to
+    its bigger extent; upscale -> a single nearest source cell (blank
+    replicated). Returns a list of (lo, hi) inclusive index pairs.
+    """
+    if tgt_n <= 1:
+        return [(0, src_n - 1)]
+    if src_n <= 1:
+        return [(0, 0)] * tgt_n
+    centers = np.linspace(0.0, src_n - 1, tgt_n)
+    mids = (centers[:-1] + centers[1:]) / 2.0
+    los = [0]
+    his = []
+    for m in mids:
+        cut = int(np.floor(m))
+        his.append(cut)
+        los.append(cut + 1)
+    his.append(src_n - 1)
+    ranges = []
+    for i in range(tgt_n):
+        lo, hi = los[i], his[i]
+        if hi < lo:  # upscale: empty bin -> nearest source cell
+            near = int(round(centers[i]))
+            lo = hi = near
+        ranges.append((max(0, lo), min(src_n - 1, hi)))
+    return ranges
+
+
 def _resize_mask(mask_valid: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-    """Nearest-neighbour resize of a boolean valid-mask onto the target grid."""
+    """Resize a boolean valid-mask, preserving blanks at their bigger extent.
+
+    A target cell is blank (invalid) if ANY source cell in its footprint is
+    blank ("bigger blank wins"): blanks never shrink away, and their shape is
+    kept by block/crop mapping rather than proportional point-sampling.
+    """
     src_rows, src_cols = mask_valid.shape
     tgt_rows, tgt_cols = target_shape
-
-    if tgt_rows > 1:
-        r_idx = np.round(np.linspace(0, src_rows - 1, tgt_rows)).astype(int)
-    else:
-        r_idx = np.array([0])
-    if tgt_cols > 1:
-        c_idx = np.round(np.linspace(0, src_cols - 1, tgt_cols)).astype(int)
-    else:
-        c_idx = np.array([0])
-
-    return mask_valid[np.ix_(r_idx, c_idx)]
+    invalid = ~mask_valid
+    r_ranges = _blank_bins(src_rows, tgt_rows)
+    c_ranges = _blank_bins(src_cols, tgt_cols)
+    out_valid = np.ones((tgt_rows, tgt_cols), dtype=bool)
+    for i, (rlo, rhi) in enumerate(r_ranges):
+        row_block = invalid[rlo:rhi + 1, :]
+        if not row_block.any():
+            continue
+        for j, (clo, chi) in enumerate(c_ranges):
+            if row_block[:, clo:chi + 1].any():
+                out_valid[i, j] = False
+    return out_valid
 
 
 def resize_matrix(values: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
     """Resize a warpage matrix to ``target_shape`` preserving warpage geometry.
 
     NaN cells are treated as blank: they are filled by nearest-valid before
-    interpolation, and the blank mask is resized (nearest-neighbour) and
-    re-applied so blanks stay blank in the output.
+    interpolation, and the blank mask is resized by block (any source blank
+    -> blank) and re-applied so blanks stay blank in the output.
 
     Args:
         values: 2D float array; NaN marks blank cells.

@@ -217,24 +217,24 @@ def test_run_pipeline_bad_reference(tmp_path):
         run_pipeline(str(top_dir), str(btm_dir), str(out_dir), reference="SIDE")
 
 
-def test_run_pipeline_auto_default_matches_top_reference(tmp_path):
-    # Default reference is AUTO; TOP (8x10) outsizes BTM (6x8), so it must
-    # behave exactly like the old reference="TOP" default.
+def test_run_pipeline_auto_default_matches_btm_reference(tmp_path):
+    # Default reference is AUTO (larger -> smaller); BTM (6x8) is smaller than
+    # TOP (8x10), so it must behave exactly like reference="BTM".
     top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
-    out_top = tmp_path / "OUT_TOP"
+    out_btm = tmp_path / "OUT_BTM"
     auto_results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir))
-    top_results = run_pipeline(
-        str(top_dir), str(btm_dir), str(out_top), reference="TOP"
+    btm_results = run_pipeline(
+        str(top_dir), str(btm_dir), str(out_btm), reference="BTM"
     )
-    assert len(auto_results) == len(top_results) > 0
-    for ra, rt in zip(auto_results, top_results):
+    assert len(auto_results) == len(btm_results) > 0
+    for ra, rt in zip(auto_results, btm_results):
         assert ra.job.out_name == rt.job.out_name
-        assert ra.result.gap.shape == (8, 10)  # TOP grid
+        assert ra.result.gap.shape == (6, 8)  # BTM grid (smaller)
         np.testing.assert_allclose(ra.result.gap, rt.result.gap, equal_nan=True)
 
 
-def test_run_pipeline_auto_picks_larger_grid(tmp_path):
-    # BTM larger than TOP -> AUTO makes BTM the reference grid.
+def test_run_pipeline_auto_picks_smaller_grid(tmp_path):
+    # TOP smaller than BTM -> AUTO makes TOP the reference grid (larger -> smaller).
     top_dir, btm_dir, out_dir = _build_dirs(
         tmp_path, top_shape=(6, 8), btm_shape=(8, 10)
     )
@@ -242,18 +242,18 @@ def test_run_pipeline_auto_picks_larger_grid(tmp_path):
     assert len(results) > 0
     for r in results:
         loaded = load_matrix(r.out_path)
-        assert loaded.shape == (8, 10)  # BTM grid
+        assert loaded.shape == (6, 8)  # TOP grid (smaller)
 
 
 def test_run_pipeline_top_transform_flip_rotate(tmp_path):
-    # Flip + one clockwise turn swaps TOP's dims (8x10 -> 10x8); the element
-    # count is unchanged so AUTO still picks TOP, and outputs follow the
-    # rotated grid.
+    # Flip + one clockwise turn swaps TOP's dims (8x10 -> 10x8); with
+    # reference="TOP" the outputs follow the rotated TOP grid.
     top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
     results = run_pipeline(
         str(top_dir),
         str(btm_dir),
         str(out_dir),
+        reference="TOP",
         top_transform=TransformConfig(flip_lr=True, rot90_cw=1),
     )
     assert len(results) > 0

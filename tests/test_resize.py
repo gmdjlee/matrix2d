@@ -71,14 +71,24 @@ def test_resize_downscale_preserves_blank_region():
     assert not np.isnan(out[0, 0])
 
 
-def test_resize_downscale_mask_scales_proportionally():
+def test_resize_downscale_blank_never_shrinks():
     a = np.ones((40, 40), dtype=np.float64)
-    # Central 20x20 hole -> blank fraction = 400/1600 = 0.25.
-    a[10:30, 10:30] = np.nan
+    a[10:30, 10:30] = np.nan  # 0.25 blank fraction
     frac_in = np.isnan(a).mean()
     out = resize_matrix(a, (20, 20))
     frac_out = np.isnan(out).mean()
-    assert abs(frac_out - frac_in) < 0.03
+    # bigger-blank block resize: blank never shrinks below the source fraction.
+    assert frac_out >= frac_in - 1e-9
+
+
+def test_resize_downscale_thin_strip_survives():
+    a = np.ones((20, 40), dtype=np.float64)
+    a[:, 18:22] = np.nan  # vertical strip
+    out = resize_matrix(a, (10, 20))
+    # Some column near the middle stays fully blank; strip not lost.
+    assert np.isnan(out).any(axis=0).sum() >= 1
+    # Corners stay valid.
+    assert not np.isnan(out[0, 0])
 
 
 def test_resize_all_blank_raises():
