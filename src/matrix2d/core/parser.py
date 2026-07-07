@@ -11,15 +11,22 @@ import numpy as np
 
 from .models import SampleMeta, WarpageData
 
-# Filename format: AAAAA_PTXXXX_YYYYYYs(ZZZC).ext
+# Filename format: AAAAA_PTXXXX_YYYYYs(ZZZC).ext (5-digit seconds).
 # Applied to the file stem (extension removed).
 _FILENAME_RE = re.compile(
-    r"^(?P<title>.*)_PT(?P<sample>\d{4})_(?P<time>\d{6})s\((?P<temp>\d{1,3})C\)$"
+    r"^(?P<title>.*)_PT(?P<sample>\d{4})_(?P<time>\d{5})s\((?P<temp>\d{1,3})C\)$"
 )
 
-# Gap filename format: TOP{n}-BTM{m}_{H|C}{temp}[_k].ext where the optional
-# _k suffix disambiguates duplicate output names (_2, _3, ...).
+# Gap filename format: {prefix}-{H|C}{temp}_TOP{n}-BTM{m}[_k].ext where prefix
+# is a free user-entered phrase and the optional _k suffix disambiguates
+# duplicate output names (_2, _3, ...). Example: TEST-C25_TOP3-BTM8.txt
 _GAP_FILENAME_RE = re.compile(
+    r"^(?P<title>.+)-(?P<phase>[HC])(?P<temp>\d{1,3})"
+    r"_TOP(?P<top>\d+)-BTM(?P<btm>\d+)(?:_\d+)?$"
+)
+
+# Legacy gap filename format: TOP{n}-BTM{m}_{H|C}{temp}[_k].ext (old OUT files).
+_GAP_FILENAME_LEGACY_RE = re.compile(
     r"^TOP(?P<top>\d+)-BTM(?P<btm>\d+)_(?P<phase>[HC])(?P<temp>\d{1,3})(?:_\d+)?$"
 )
 
@@ -49,7 +56,7 @@ def parse_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
     if match is None:
         raise ValueError(
             "Filename '{0}' does not match expected format "
-            "'AAAAA_PTXXXX_YYYYYYs(ZZZC).ext' (stem checked: '{1}')".format(
+            "'AAAAA_PTXXXX_YYYYYs(ZZZC).ext' (stem checked: '{1}')".format(
                 filename, stem
             )
         )
@@ -68,12 +75,14 @@ def parse_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
 
 
 def parse_gap_filename(filename: str, path: str = "") -> SampleMeta:
-    """Parse a gap filename like ``TOP1-BTM12_H250.txt`` into a SampleMeta.
+    """Parse a gap filename like ``TEST-C25_TOP3-BTM8.txt`` into a SampleMeta.
 
-    The result has ``kind="GAP"``, ``sample_no`` = TOP sample number,
-    ``btm_no`` = BTM sample number, an explicit ``phase`` ("H"/"C") and
-    ``time_s=0`` (gap files carry no measurement time). A duplicate suffix
-    (``_2``, ``_3``, ...) is accepted and ignored.
+    The primary format is ``{prefix}-{H|C}{temp}_TOP{n}-BTM{m}[_k].ext``;
+    the legacy output format ``TOP{n}-BTM{m}_{H|C}{temp}[_k].ext`` is still
+    accepted. The result has ``kind="GAP"``, ``sample_no`` = TOP sample
+    number, ``btm_no`` = BTM sample number, an explicit ``phase`` ("H"/"C")
+    and ``time_s=0`` (gap files carry no measurement time). A duplicate
+    suffix (``_2``, ``_3``, ...) is accepted and ignored.
 
     Args:
         filename: The filename (with or without directory/extension).
@@ -83,17 +92,19 @@ def parse_gap_filename(filename: str, path: str = "") -> SampleMeta:
         A SampleMeta with parsed fields.
 
     Raises:
-        ValueError: If the filename does not match the gap naming format.
+        ValueError: If the filename matches neither gap naming format.
     """
     base = os.path.basename(filename)
     stem, _ext = os.path.splitext(base)
     match = _GAP_FILENAME_RE.match(stem)
     if match is None:
+        match = _GAP_FILENAME_LEGACY_RE.match(stem)
+    if match is None:
         raise ValueError(
             "Filename '{0}' does not match gap format "
-            "'TOP{{n}}-BTM{{m}}_{{H|C}}{{temp}}.ext' (stem checked: '{1}')".format(
-                filename, stem
-            )
+            "'{{prefix}}-{{H|C}}{{temp}}_TOP{{n}}-BTM{{m}}.ext' (or the "
+            "legacy 'TOP{{n}}-BTM{{m}}_{{H|C}}{{temp}}.ext'; stem checked: "
+            "'{1}')".format(filename, stem)
         )
     return SampleMeta(
         title=stem,
@@ -110,9 +121,10 @@ def parse_gap_filename(filename: str, path: str = "") -> SampleMeta:
 def parse_data_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
     """Parse a data filename for a kind, dispatching on the naming format.
 
-    GAP files use the gap output format ``TOP{n}-BTM{m}_{H|C}{temp}``,
-    falling back to the standard measurement format for legacy files.
-    TOP/BTM always use the measurement format.
+    GAP files use the gap output format ``{prefix}-{H|C}{temp}_TOP{n}-BTM{m}``
+    (or the legacy ``TOP{n}-BTM{m}_{H|C}{temp}``), falling back to the
+    standard measurement format for legacy files. TOP/BTM always use the
+    measurement format.
 
     Raises:
         ValueError: If no applicable format matches.

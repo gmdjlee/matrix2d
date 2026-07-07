@@ -83,7 +83,7 @@ class TestPhaseEntries:
 class TestMetaDictRoundTrip:
     def test_gap_fields_roundtrip(self):
         from matrix2d.core.parser import parse_gap_filename
-        meta = parse_gap_filename("TOP1-BTM12_H250.txt")
+        meta = parse_gap_filename("TEST-H250_TOP1-BTM12.txt")
         back = helpers.meta_from_dict(helpers.meta_to_dict(meta))
         assert back == meta
 
@@ -95,7 +95,7 @@ class TestMetaDictRoundTrip:
 
     def test_gap_label(self):
         from matrix2d.core.parser import parse_gap_filename
-        meta = parse_gap_filename("TOP1-BTM12_H250.txt")
+        meta = parse_gap_filename("TEST-H250_TOP1-BTM12.txt")
         assert helpers.meta_label(meta) == "GAP TOP1-BTM12 H250C"
         assert helpers.meta_label_from_dict(
             helpers.meta_to_dict(meta)) == "GAP TOP1-BTM12 H250C"
@@ -116,10 +116,18 @@ class TestSortPhaseTemps:
 
 class TestParseGapName:
     def test_basic(self):
+        p = helpers.parse_gap_name("TEST-C25_TOP3-BTM8.txt")
+        assert p == {"top_no": 3, "btm_no": 8, "phase": "C", "temp_c": 25}
+
+    def test_duplicate_suffix(self):
+        p = helpers.parse_gap_name("TEST-H240_TOP1-BTM2_2.txt")
+        assert p == {"top_no": 1, "btm_no": 2, "phase": "H", "temp_c": 240}
+
+    def test_legacy_name(self):
         p = helpers.parse_gap_name("TOP1-BTM2_H240.txt")
         assert p == {"top_no": 1, "btm_no": 2, "phase": "H", "temp_c": 240}
 
-    def test_duplicate_suffix(self):
+    def test_legacy_duplicate_suffix(self):
         p = helpers.parse_gap_name("TOP12-BTM3_C85_2.txt")
         assert p == {"top_no": 12, "btm_no": 3, "phase": "C", "temp_c": 85}
 

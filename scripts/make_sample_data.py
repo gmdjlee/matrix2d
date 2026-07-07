@@ -9,7 +9,7 @@ sentinel values marking blanks.
 
 The GAP folder is populated by running the real gap pipeline over the demo
 TOP/BTM data, so its files use the gap naming format
-``TOP{n}-BTM{m}_{H|C}{temp}.txt``.
+``{prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt`` (prefix "GAP").
 
 Run:  python scripts/make_sample_data.py
 """
@@ -104,7 +104,7 @@ def _write_dat(path, vals, sentinel_mask, rng):
 
 
 def _filename(title, sample_no, time_s, temp_c):
-    return "{0}_PT{1:04d}_{2:06d}s({3}C).dat".format(title, sample_no, time_s, temp_c)
+    return "{0}_PT{1:04d}_{2:05d}s({3}C).dat".format(title, sample_no, time_s, temp_c)
 
 
 def main():
@@ -143,7 +143,7 @@ def main():
                 path = os.path.join(dirs[kind], fname)
                 _write_dat(path, vals, sent, rng)
 
-    # Populate GAP with real pipeline output (gap naming: TOPn-BTMm_H|Ctemp).
+    # Populate GAP with real pipeline output (gap naming: GAP-H|Ctemp_TOPn-BTMm).
     from matrix2d.services.pipeline import run_pipeline
 
     gap_results = run_pipeline(dirs["TOP"], dirs["BTM"], dirs["GAP"])

@@ -46,14 +46,16 @@ charts.py stays Dash-free so it ports directly to the React migration.
   `scan_folder` validates NAME and CONTENT; invalid files are skipped with
   a logged warning (never abort). A set folder that scans to 0 files →
   UI shows a "데이터 없음 (no valid data files)" error.
-- **Filename (TOP/BTM)**: `TITLE_PTXXXX_YYYYYYs(ZZZC).ext` — PT+4-digit
-  sample no, 6-digit seconds + `s`, 1–3 digit Celsius + `C` in parens.
+- **Filename (TOP/BTM)**: `TITLE_PTXXXX_YYYYYs(ZZZC).ext` — PT+4-digit
+  sample no, 5-digit seconds + `s`, 1–3 digit Celsius + `C` in parens.
   Regex anchors on the LAST `_PT` so titles may contain underscores.
-- **Filename (GAP folder)**: same as OUT files — `TOP{n}-BTM{m}_{H|C}{temp}
-  [_k].ext` (`_k` = duplicate suffix). `parse_gap_filename` → sample_no =
-  TOP no, `btm_no` = BTM no, explicit `phase`, time_s = 0. Legacy
-  `TITLE_PT...` names still parse as fallback (`parse_data_filename`
-  dispatches by kind).
+- **Filename (GAP folder)**: same as OUT files —
+  `{prefix}-{H|C}{temp}_TOP{n}-BTM{m}[_k].ext` (e.g. `TEST-C25_TOP3-BTM8.txt`;
+  `prefix` = free user phrase, may itself contain `-`/`_`; `_k` = duplicate
+  suffix). `parse_gap_filename` → sample_no = TOP no, `btm_no` = BTM no,
+  explicit `phase`, time_s = 0. Legacy `TOP{n}-BTM{m}_{H|C}{temp}` and
+  legacy `TITLE_PT...` names still parse as fallbacks
+  (`parse_data_filename` dispatches by kind).
 - **Gap**: `diff = TOP - BTM`; `offset = nanmin(diff)`; `gap = diff - offset`.
   Minimum valid gap is exactly 0.0 (first contact point). NaN propagates.
 - **Resize**: values bilinear-interpolated on normalized grid (no warpage
@@ -73,8 +75,10 @@ charts.py stays Dash-free so it ports directly to the React migration.
   new array (never mutates input — matrix cache safety).
 - **H/C phase**: per sample-pair, peak time = time of max temperature;
   `time <= peak` → `H` (heating), else `C` (cooling).
-- **Output name**: `TOP{n}-BTM{m}_{H|C}{temp}.txt` into OUT folder,
+- **Output name**: `{prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt` into OUT folder,
   tab-delimited, NaN written as `nan`. Duplicate names get `_2`, `_3`.
+  Prefix = Gap tab "Output name prefix" input; `naming.sanitize_prefix`
+  strips filename-illegal chars, blank → `GAP`.
 - **Pairing**: every TOP-sample × BTM-sample combination; per shared
   temperature, H pairs with H and C with C.
 
@@ -97,6 +101,16 @@ charts.py stays Dash-free so it ports directly to the React migration.
   previews data exactly as the pipeline consumes it: 2D resizes the
   non-reference side of the selected pair; 3D brings all selected TOP/BTM
   datasets onto one reference grid (GAP surfaces untouched).
+- Gap compute runs in a background thread (module-level `_COMPUTE` state in
+  callbacks.py, guarded by a Lock); a 400ms `dcc.Interval` polls it to drive
+  the progress bar and publishes results when done (duplicate outputs use
+  `allow_duplicate=True`). `run_pipeline(progress_cb=...)` reports
+  (done, total) per job.
+- Gap tab layout: charts (inspect dropdown + 2D + 3D) on the LEFT, result
+  table on the RIGHT; `.table-wrap` scrolls internally (max-height, sticky
+  header) instead of the page.
+- "Save All Images (2D+3D)" exports `{out_name}_2D.png` / `_3D.png` per
+  computed gap into OUT via kaleido, using current ChartOptions.
 
 ## Migration plan (phase 2)
 

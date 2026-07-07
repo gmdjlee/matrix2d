@@ -148,23 +148,27 @@ def sort_phase_temps(pairs):
     return list(heating) + list(cooling)
 
 
-_GAP_NAME_RE = re.compile(r"^TOP(\d+)-BTM(\d+)_(H|C)(\d{1,3})")
+_GAP_NAME_RE = re.compile(
+    r"^.+-(?P<phase>[HC])(?P<temp>\d{1,3})_TOP(?P<top>\d+)-BTM(?P<btm>\d+)")
+_GAP_NAME_LEGACY_RE = re.compile(
+    r"^TOP(?P<top>\d+)-BTM(?P<btm>\d+)_(?P<phase>[HC])(?P<temp>\d{1,3})")
 
 
 def parse_gap_name(out_name: str) -> Optional[dict]:
-    """Parse a gap output name like ``TOP1-BTM2_H240.txt`` (``_2`` suffix ok).
+    """Parse a gap output name like ``TEST-C25_TOP3-BTM8.txt`` (``_2`` ok).
 
-    Returns ``{"top_no", "btm_no", "phase", "temp_c"}`` or None if the name
-    does not match the output naming convention.
+    The legacy naming ``TOP1-BTM2_H240.txt`` is also accepted. Returns
+    ``{"top_no", "btm_no", "phase", "temp_c"}`` or None if the name matches
+    neither naming convention.
     """
-    m = _GAP_NAME_RE.match(out_name)
+    m = _GAP_NAME_RE.match(out_name) or _GAP_NAME_LEGACY_RE.match(out_name)
     if not m:
         return None
     return {
-        "top_no": int(m.group(1)),
-        "btm_no": int(m.group(2)),
-        "phase": m.group(3),
-        "temp_c": int(m.group(4)),
+        "top_no": int(m.group("top")),
+        "btm_no": int(m.group("btm")),
+        "phase": m.group("phase"),
+        "temp_c": int(m.group("temp")),
     }
 
 

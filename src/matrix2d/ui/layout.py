@@ -270,23 +270,43 @@ def _tab_3d() -> html.Div:
 def _tab_gap() -> html.Div:
     return html.Div(className="tab-body", children=[
         html.Div(className="controls-row", children=[
-            html.Div("Reference size is set in Data Options (sidebar).",
+            html.Div(className="field", children=[
+                html.Label("Output name prefix"),
+                dcc.Input(id="gap-out-prefix", type="text", value="GAP",
+                          placeholder="e.g. TEST", className="input-full"),
+            ]),
+            html.Div("Output: {prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt — "
+                     "reference size is set in Data Options (sidebar).",
                      className="status"),
             html.Button("Compute All Gaps", id="btn-compute-gaps",
                         n_clicks=0, className="btn btn-primary"),
+            html.Button("Save All Images (2D+3D)", id="btn-export-all-gaps",
+                        n_clicks=0, className="btn"),
         ]),
+        # progress bar for the background compute; polled by the interval
+        html.Div(className="progress-outer", children=[
+            html.Div(id="gap-progress-bar", className="progress-inner"),
+        ]),
+        html.Div(id="gap-progress-label", className="status"),
+        dcc.Interval(id="gap-progress-interval", interval=400, disabled=True),
+        html.Div(id="export-all-status", className="status"),
         html.Div(id="gap-error", className="error"),
-        html.Div(id="gap-table", className="table-wrap"),
-        html.Hr(),
-        html.Div(className="field", children=[
-            html.Label("Inspect a computed result"),
-            dcc.Dropdown(id="gap-result-select", options=[],
-                         placeholder="compute gaps first"),
-        ]),
-        html.Div(id="gap-inspect-error", className="error"),
-        html.Div(className="graph-pair", children=[
-            dcc.Graph(id="gap-graph-2d", className="graph half"),
-            dcc.Graph(id="gap-graph-3d", className="graph half"),
+        # charts on the left, result list on the right (table scrolls itself)
+        html.Div(className="gap-split", children=[
+            html.Div(className="gap-left", children=[
+                html.Div(className="field", children=[
+                    html.Label("Inspect a computed result"),
+                    dcc.Dropdown(id="gap-result-select", options=[],
+                                 placeholder="compute gaps first"),
+                ]),
+                html.Div(id="gap-inspect-error", className="error"),
+                dcc.Graph(id="gap-graph-2d", className="graph"),
+                dcc.Graph(id="gap-graph-3d", className="graph"),
+            ]),
+            html.Div(className="gap-right", children=[
+                html.Label("Results"),
+                html.Div(id="gap-table", className="table-wrap"),
+            ]),
         ]),
     ])
 

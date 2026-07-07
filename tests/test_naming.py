@@ -1,7 +1,13 @@
 import pytest
 
 from matrix2d.core.models import SampleMeta
-from matrix2d.core.naming import assign_phase, gap_filename, peak_time
+from matrix2d.core.naming import (
+    DEFAULT_GAP_PREFIX,
+    assign_phase,
+    gap_filename,
+    peak_time,
+    sanitize_prefix,
+)
 
 
 def _meta(sample_no, time_s, temp_c, kind="TOP"):
@@ -47,10 +53,40 @@ def test_peak_time_empty_raises():
 def test_gap_filename_format():
     top = _meta(1, 60, 240, "TOP")
     btm = _meta(2, 60, 240, "BTM")
-    assert gap_filename(top, btm, "H") == "TOP1-BTM2_H240.txt"
+    assert gap_filename(top, btm, "H", prefix="TEST") == "TEST-H240_TOP1-BTM2.txt"
+
+
+def test_gap_filename_example_from_spec():
+    top = _meta(3, 10, 25, "TOP")
+    btm = _meta(8, 10, 25, "BTM")
+    assert gap_filename(top, btm, "C", prefix="TEST") == "TEST-C25_TOP3-BTM8.txt"
 
 
 def test_gap_filename_uses_top_temp():
     top = _meta(3, 10, 25, "TOP")
-    btm = _meta(4, 10, 25, "BTM")
-    assert gap_filename(top, btm, "C") == "TOP3-BTM4_C25.txt"
+    btm = _meta(4, 10, 30, "BTM")
+    assert gap_filename(top, btm, "C", prefix="X") == "X-C25_TOP3-BTM4.txt"
+
+
+def test_gap_filename_default_prefix():
+    top = _meta(1, 60, 240, "TOP")
+    btm = _meta(2, 60, 240, "BTM")
+    assert gap_filename(top, btm, "H") == \
+        "{0}-H240_TOP1-BTM2.txt".format(DEFAULT_GAP_PREFIX)
+
+
+# ---- sanitize_prefix -----------------------------------------------------------
+
+def test_sanitize_prefix_passthrough():
+    assert sanitize_prefix("TEST") == "TEST"
+
+
+def test_sanitize_prefix_strips_illegal_chars_and_whitespace():
+    assert sanitize_prefix('  a/b\\c:d*e?f"g<h>i|j  ') == "abcdefghij"
+
+
+def test_sanitize_prefix_blank_falls_back_to_default():
+    assert sanitize_prefix("") == DEFAULT_GAP_PREFIX
+    assert sanitize_prefix(None) == DEFAULT_GAP_PREFIX
+    assert sanitize_prefix("  ") == DEFAULT_GAP_PREFIX
+    assert sanitize_prefix("///") == DEFAULT_GAP_PREFIX

@@ -34,9 +34,17 @@ def test_plan_jobs_pairs_h_and_c():
     jobs = plan_jobs(tops, btms)
     names = sorted(j.out_name for j in jobs)
     # 240 H, 240 C, plus 260 H (peak present in both).
-    assert "TOP1-BTM2_H240.txt" in names
-    assert "TOP1-BTM2_C240.txt" in names
-    assert "TOP1-BTM2_H260.txt" in names
+    assert "GAP-H240_TOP1-BTM2.txt" in names
+    assert "GAP-C240_TOP1-BTM2.txt" in names
+    assert "GAP-H260_TOP1-BTM2.txt" in names
+
+
+def test_plan_jobs_custom_prefix():
+    tops = [_meta(3, 11, 25, "TOP")]
+    btms = [_meta(8, 11, 25, "BTM")]
+    jobs = plan_jobs(tops, btms, out_prefix="TEST")
+    # 25C is at/before the single sample's peak -> H phase.
+    assert [j.out_name for j in jobs] == ["TEST-H25_TOP3-BTM8.txt"]
 
 
 def test_plan_jobs_all_combinations():
@@ -111,13 +119,13 @@ def _build_dirs(tmp_path, top_shape=(8, 10), btm_shape=(6, 8)):
     for time_s, temp_c in schedule:
         top_arr = _make_surface(top_shape[0], top_shape[1], base=5.0 + 0.01 * temp_c)
         _write_dat(
-            str(top_dir / "WAFER_PT0001_{0:06d}s({1}C).dat".format(time_s, temp_c)),
+            str(top_dir / "WAFER_PT0001_{0:05d}s({1}C).dat".format(time_s, temp_c)),
             top_arr,
         )
         # BTM smaller grid by default to exercise resize.
         btm_arr = _make_surface(btm_shape[0], btm_shape[1], base=1.0 + 0.005 * temp_c)
         _write_dat(
-            str(btm_dir / "WAFER_PT0002_{0:06d}s({1}C).dat".format(time_s, temp_c)),
+            str(btm_dir / "WAFER_PT0002_{0:05d}s({1}C).dat".format(time_s, temp_c)),
             btm_arr,
         )
     return top_dir, btm_dir, out_dir
@@ -130,8 +138,8 @@ def test_run_pipeline_end_to_end(tmp_path):
 
     names = sorted(os.path.basename(r.out_path) for r in results)
     # Expect H/C at 240 and H at 260 (peak) among outputs.
-    assert "TOP1-BTM2_H240.txt" in names
-    assert "TOP1-BTM2_C240.txt" in names
+    assert "GAP-H240_TOP1-BTM2.txt" in names
+    assert "GAP-C240_TOP1-BTM2.txt" in names
 
     # Output files exist and round-trip through load_matrix.
     for r in results:
@@ -249,12 +257,12 @@ def test_run_pipeline_zero_cell_on_nan_skips_job_continues(tmp_path, caplog):
     # hole covering (2, 3); the 260C TOP file is fully valid.
     holed = _make_surface(8, 10, base=5.0, hole=True)
     clean = _make_surface(8, 10, base=7.0, hole=False)
-    _write_dat(str(top_dir / "WAFER_PT0001_000011s(25C).dat"), holed)
-    _write_dat(str(top_dir / "WAFER_PT0001_000100s(260C).dat"), clean)
+    _write_dat(str(top_dir / "WAFER_PT0001_00011s(25C).dat"), holed)
+    _write_dat(str(top_dir / "WAFER_PT0001_00100s(260C).dat"), clean)
     for time_s, temp_c in ((11, 25), (100, 260)):
         btm_arr = _make_surface(6, 8, base=1.0, hole=False)
         _write_dat(
-            str(btm_dir / "WAFER_PT0002_{0:06d}s({1}C).dat".format(time_s, temp_c)),
+            str(btm_dir / "WAFER_PT0002_{0:05d}s({1}C).dat".format(time_s, temp_c)),
             btm_arr,
         )
 
@@ -268,5 +276,28 @@ def test_run_pipeline_zero_cell_on_nan_skips_job_continues(tmp_path, caplog):
 
     # The 25C job failed (NaN zero cell); the 260C job still succeeded.
     names = [r.job.out_name for r in results]
-    assert names == ["TOP1-BTM2_H260.txt"]
+    assert names == ["GAP-H260_TOP1-BTM2.txt"]
     assert any("blank" in rec.getMessage() for rec in caplog.records)
+
+
+def test_run_pipeline_custom_prefix_in_out_names(tmp_path):
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir),
+                           out_prefix="TEST")
+    assert len(results) > 0
+    for r in results:
+        assert os.path.basename(r.out_path).startswith("TEST-")
+
+
+def test_run_pipeline_progress_callback(tmp_path):
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    calls = []
+    results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir),
+                           progress_cb=lambda d, t: calls.append((d, t)))
+    total = calls[0][1]
+    # one initial (0, total) plus one call per job, done counting up to total
+    assert calls[0] == (0, total)
+    assert calls[-1] == (total, total)
+    assert len(calls) == total + 1
+    assert [d for d, _t in calls] == list(range(total + 1))
+    assert len(results) == total  # every job succeeded here

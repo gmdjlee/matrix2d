@@ -15,6 +15,7 @@ Dataset selection model:
 
 import dataclasses
 import os
+import threading
 import traceback
 from typing import List, Optional
 
@@ -23,6 +24,22 @@ from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.ui import charts, helpers
 from matrix2d.ui.dialogs import pick_folder
+
+
+# ---------------------------------------------------------------------------
+# Background gap-compute state. The Compute button starts a worker thread and
+# a dcc.Interval polls this dict to drive the progress bar and, on completion,
+# publish the results. Module-level is fine: local single-user app.
+# ---------------------------------------------------------------------------
+
+_COMPUTE_LOCK = threading.Lock()
+_COMPUTE = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "results": None,   # List[GapJobResult] on success (consumed by the poller)
+    "error": None,     # traceback string on failure (consumed by the poller)
+}
 
 
 # ---------------------------------------------------------------------------
@@ -703,40 +720,109 @@ def register_callbacks(app):
             return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
-    # 4. Gap compute: run pipeline, build table + result dropdown.
+    # 4. Gap compute: the button starts a background thread; a dcc.Interval
+    #    polls the shared _COMPUTE state to drive the progress bar and, when
+    #    the run finishes, publishes the table + result dropdown.
     #    (3D options refresh automatically via the store-gaps Input above.)
     # -------------------------------------------------------------------
-    @app.callback(
-        Output("store-gaps", "data"),
-        Output("gap-table", "children"),
-        Output("gap-error", "children"),
-        Output("gap-result-select", "options"),
-        Output("gap-result-select", "value"),
-        Input("btn-compute-gaps", "n_clicks"),
-        [State("folder-top", "value"),
-         State("folder-btm", "value"),
-         State("folder-out", "value"),
-         State("gap-reference", "value")]
-        + _TRANSFORM_STATES,
-        prevent_initial_call=True,
-    )
-    def compute_gaps(_n, top_dir, btm_dir, out_dir, reference,
-                     *transform_values):
+    def _compute_worker(top_dir, btm_dir, out_dir, reference,
+                        top_cfg, btm_cfg, out_prefix):
         from matrix2d.services.pipeline import run_pipeline
 
-        if not top_dir or not btm_dir or not out_dir:
-            return no_update, no_update, \
-                "TOP, BTM and OUT folders are required.", no_update, no_update
-        top_cfg, btm_cfg = _transform_configs(transform_values)
+        def _on_progress(done, total):
+            with _COMPUTE_LOCK:
+                _COMPUTE["done"] = done
+                _COMPUTE["total"] = total
+
         try:
             results = run_pipeline(top_dir, btm_dir, out_dir,
                                    reference=reference,
                                    top_transform=top_cfg,
-                                   btm_transform=btm_cfg)
+                                   btm_transform=btm_cfg,
+                                   out_prefix=out_prefix,
+                                   progress_cb=_on_progress)
+            with _COMPUTE_LOCK:
+                _COMPUTE["results"] = results
         except Exception:  # noqa: BLE001
-            return no_update, no_update, \
-                "Pipeline error: " + traceback.format_exc(limit=3), \
-                no_update, no_update
+            with _COMPUTE_LOCK:
+                _COMPUTE["error"] = traceback.format_exc(limit=3)
+        finally:
+            with _COMPUTE_LOCK:
+                _COMPUTE["running"] = False
+
+    @app.callback(
+        Output("gap-progress-interval", "disabled"),
+        Output("btn-compute-gaps", "disabled"),
+        Output("gap-error", "children"),
+        Output("gap-progress-bar", "style"),
+        Output("gap-progress-label", "children"),
+        Input("btn-compute-gaps", "n_clicks"),
+        [State("folder-top", "value"),
+         State("folder-btm", "value"),
+         State("folder-out", "value"),
+         State("gap-reference", "value"),
+         State("gap-out-prefix", "value")]
+        + _TRANSFORM_STATES,
+        prevent_initial_call=True,
+    )
+    def start_compute(_n, top_dir, btm_dir, out_dir, reference, out_prefix,
+                      *transform_values):
+        if not top_dir or not btm_dir or not out_dir:
+            return (True, False, "TOP, BTM and OUT folders are required.",
+                    {"width": "0%"}, "")
+        with _COMPUTE_LOCK:
+            if _COMPUTE["running"]:
+                return no_update, no_update, no_update, no_update, no_update
+            _COMPUTE.update(running=True, done=0, total=0,
+                            results=None, error=None)
+        top_cfg, btm_cfg = _transform_configs(transform_values)
+        threading.Thread(
+            target=_compute_worker,
+            args=(top_dir, btm_dir, out_dir, reference,
+                  top_cfg, btm_cfg, out_prefix or ""),
+            daemon=True,
+        ).start()
+        return False, True, "", {"width": "0%"}, "Scanning folders..."
+
+    @app.callback(
+        Output("store-gaps", "data"),
+        Output("gap-table", "children"),
+        Output("gap-result-select", "options"),
+        Output("gap-result-select", "value"),
+        Output("gap-progress-interval", "disabled", allow_duplicate=True),
+        Output("btn-compute-gaps", "disabled", allow_duplicate=True),
+        Output("gap-error", "children", allow_duplicate=True),
+        Output("gap-progress-bar", "style", allow_duplicate=True),
+        Output("gap-progress-label", "children", allow_duplicate=True),
+        Input("gap-progress-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def poll_compute(_n):
+        with _COMPUTE_LOCK:
+            running = _COMPUTE["running"]
+            done, total = _COMPUTE["done"], _COMPUTE["total"]
+            results, error = _COMPUTE["results"], _COMPUTE["error"]
+            if not running:  # consume the outcome exactly once
+                _COMPUTE["results"] = None
+                _COMPUTE["error"] = None
+
+        pct = (100.0 * done / total) if total else 0.0
+        bar = {"width": "{0:.0f}%".format(pct)}
+        label = ("{0} / {1} jobs".format(done, total) if total
+                 else "Scanning folders...")
+
+        if running:
+            return (no_update, no_update, no_update, no_update,
+                    no_update, no_update, no_update, bar, label)
+
+        if error is not None:
+            return (no_update, no_update, no_update, no_update,
+                    True, False, "Pipeline error: " + error, bar, "Failed")
+        if results is None:
+            # nothing pending (stale tick after the outcome was consumed)
+            return (no_update, no_update, no_update, no_update,
+                    True, False, no_update, no_update, no_update)
+
         # clear the old cache only after the pipeline succeeded, so a failed
         # run does not leave store-gaps pointing at purged cache entries.
         helpers.clear_gaps()
@@ -784,7 +870,9 @@ def register_callbacks(app):
                 "Computed {n} gap(s).".format(n=len(summaries)), className="ok")
         # reset the inspect selection: out_names can be identical across runs,
         # so keeping the value would leave a chart of the previous run's data.
-        return summaries, table, status, result_opts, None
+        return (summaries, table, result_opts, None,
+                True, False, status, {"width": "100%"},
+                "{0} / {0} jobs — done".format(total))
 
     # 4b. Inspect a chosen computed gap: 2D contour + 3D surface.
     @app.callback(
@@ -854,3 +942,46 @@ def register_callbacks(app):
     )
     def export_3d(_n, fig_dict, out_dir):
         return _export(fig_dict, out_dir, "chart_3d.png")
+
+    # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
+    @app.callback(
+        Output("export-all-status", "children"),
+        Input("btn-export-all-gaps", "n_clicks"),
+        [State("store-gaps", "data"),
+         State("folder-out", "value")]
+        + _OPTION_STATES,
+        prevent_initial_call=True,
+    )
+    def export_all_gaps(_n, store_gaps, out_dir, *option_values):
+        if not store_gaps:
+            return "No computed gaps to export — run Compute All Gaps first."
+        if not out_dir:
+            return "Set an OUT folder first."
+        opts = _build_options(*option_values)
+        saved = 0
+        failed = []
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as exc:
+            return "Export error: {0}".format(exc)
+        for s in store_gaps:
+            name = s.get("out_name", "")
+            values = helpers.get_gap(name)
+            if values is None:
+                failed.append(name + " (not in cache)")
+                continue
+            stem = os.path.splitext(name)[0]
+            gap_opts = dataclasses.replace(
+                opts, title=opts.title or "GAP " + name)
+            try:
+                fig2d = charts.contour_2d(values, gap_opts)
+                fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"))
+                fig3d = charts.surface_3d(values, gap_opts, name=name)
+                fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))
+                saved += 2
+            except Exception as exc:  # noqa: BLE001 - keep exporting the rest
+                failed.append("{0} ({1})".format(name, exc))
+        msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
+        if failed:
+            msg += " Failed: " + ", ".join(failed)
+        return msg

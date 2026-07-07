@@ -222,7 +222,10 @@ body {
 
 /* ---- results table ---- */
 .table-wrap {
-    overflow-x: auto;
+    overflow: auto;
+    max-height: calc(100vh - 220px);
+    border: 1px solid var(--border);
+    border-radius: 6px;
 }
 
 .result-table {
@@ -241,4 +244,48 @@ body {
 
 .result-table th {
     background: #eef2f7;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+/* ---- gap tab split: charts left, result list right ---- */
+.gap-split {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+.gap-left {
+    flex: 1 1 55%;
+    min-width: 0;
+}
+
+.gap-right {
+    flex: 1 1 45%;
+    min-width: 320px;
+}
+
+.gap-right > label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+}
+
+/* ---- compute progress bar ---- */
+.progress-outer {
+    height: 14px;
+    background: #e5e7eb;
+    border-radius: 7px;
+    overflow: hidden;
+    margin: 8px 0 2px;
+}
+
+.progress-inner {
+    height: 100%;
+    width: 0;
+    background: var(--primary);
+    border-radius: 7px;
+    transition: width 0.3s ease;
 }

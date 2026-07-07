@@ -8,9 +8,15 @@ A measurement session heats to a peak temperature then cools. The same
 rule handles both single and dual occurrence.
 """
 
+import re
 from typing import List
 
 from .models import SampleMeta
+
+# Characters not allowed in filenames on Windows (plus path separators).
+_ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+DEFAULT_GAP_PREFIX = "GAP"
 
 
 def assign_phase(time_s: int, peak_time_s: int) -> str:
@@ -47,21 +53,37 @@ def peak_time(metas: "List[SampleMeta]") -> int:
     return min(times_at_peak)
 
 
-def gap_filename(top: SampleMeta, btm: SampleMeta, phase: str) -> str:
+def sanitize_prefix(prefix: str) -> str:
+    """Clean a user-entered output prefix for use in a filename.
+
+    Strips whitespace and characters that are illegal in filenames; an
+    empty/blank result falls back to ``DEFAULT_GAP_PREFIX``.
+    """
+    cleaned = _ILLEGAL_FILENAME_CHARS.sub("", (prefix or "")).strip()
+    return cleaned if cleaned else DEFAULT_GAP_PREFIX
+
+
+def gap_filename(
+    top: SampleMeta, btm: SampleMeta, phase: str,
+    prefix: str = DEFAULT_GAP_PREFIX,
+) -> str:
     """Build the gap output filename for a TOP/BTM pair at a given phase.
 
-    Format: ``TOP{top_no}-BTM{btm_no}_{phase}{temp}.txt`` where temp is the
-    TOP sample's temperature.
+    Format: ``{prefix}-{phase}{temp}_TOP{top_no}-BTM{btm_no}.txt`` where
+    temp is the TOP sample's temperature and prefix is a user-entered
+    phrase (sanitized; blank falls back to ``DEFAULT_GAP_PREFIX``).
+    Example: ``TEST-C25_TOP3-BTM8.txt``.
 
     Args:
         top: TOP sample metadata.
         btm: BTM sample metadata.
         phase: "H" or "C".
+        prefix: User-entered output phrase.
 
     Returns:
         The output filename string.
     """
     temp = top.temp_c
-    return "TOP{0}-BTM{1}_{2}{3}.txt".format(
-        top.sample_no, btm.sample_no, phase, temp
+    return "{0}-{1}{2}_TOP{3}-BTM{4}.txt".format(
+        sanitize_prefix(prefix), phase, temp, top.sample_no, btm.sample_no
     )

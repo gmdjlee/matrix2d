@@ -3,11 +3,16 @@
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..core.gap import compute_gap
 from ..core.models import GapResult, SampleMeta
-from ..core.naming import assign_phase, gap_filename, peak_time
+from ..core.naming import (
+    DEFAULT_GAP_PREFIX,
+    assign_phase,
+    gap_filename,
+    peak_time,
+)
 from ..core.resize import resize_to_reference
 from ..core.transform import TransformConfig, apply_transform
 from .repository import load_data, save_matrix, scan_folder
@@ -64,7 +69,8 @@ def _phase_map(
 
 
 def plan_jobs(
-    tops: "List[SampleMeta]", btms: "List[SampleMeta]"
+    tops: "List[SampleMeta]", btms: "List[SampleMeta]",
+    out_prefix: str = DEFAULT_GAP_PREFIX,
 ) -> "List[GapJob]":
     """Plan gap jobs for every TOP-sample x BTM-sample combination.
 
@@ -78,6 +84,8 @@ def plan_jobs(
     Args:
         tops: TOP sample metadata (may span multiple samples).
         btms: BTM sample metadata (may span multiple samples).
+        out_prefix: User phrase for output filenames
+            (``{prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt``).
 
     Returns:
         A list of GapJob, ordered deterministically.
@@ -104,7 +112,8 @@ def plan_jobs(
                         continue
                     top_meta = top_pmap[key]
                     btm_meta = btm_pmap[key]
-                    base_name = gap_filename(top_meta, btm_meta, phase)
+                    base_name = gap_filename(
+                        top_meta, btm_meta, phase, prefix=out_prefix)
 
                     count = used_names.get(base_name, 0)
                     used_names[base_name] = count + 1
@@ -132,6 +141,8 @@ def run_pipeline(
     reference: str = "AUTO",
     top_transform: "Optional[TransformConfig]" = None,
     btm_transform: "Optional[TransformConfig]" = None,
+    out_prefix: str = DEFAULT_GAP_PREFIX,
+    progress_cb: "Optional[Callable[[int, int], None]]" = None,
 ) -> "List[GapJobResult]":
     """Run the full gap pipeline over two folders of measurements.
 
@@ -154,6 +165,11 @@ def run_pipeline(
             dataset with the larger element count; ties go to TOP.
         top_transform: Optional TransformConfig applied to each TOP matrix.
         btm_transform: Optional TransformConfig applied to each BTM matrix.
+        out_prefix: User phrase for output filenames
+            (``{prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt``).
+        progress_cb: Optional ``callback(done, total)`` invoked once with
+            ``(0, total)`` after planning and again after every job
+            (successful or failed). Exceptions from the callback propagate.
 
     Returns:
         A list of GapJobResult for the successful jobs.
@@ -170,10 +186,13 @@ def run_pipeline(
 
     tops = scan_folder(top_dir, "TOP")
     btms = scan_folder(btm_dir, "BTM")
-    jobs = plan_jobs(tops, btms)
+    jobs = plan_jobs(tops, btms, out_prefix=out_prefix)
+
+    if progress_cb is not None:
+        progress_cb(0, len(jobs))
 
     results: List[GapJobResult] = []
-    for job in jobs:
+    for done, job in enumerate(jobs, start=1):
         try:
             top_data = load_data(job.top)
             btm_data = load_data(job.btm)
@@ -228,4 +247,7 @@ def run_pipeline(
                 job.out_name,
                 exc,
             )
+        finally:
+            if progress_cb is not None:
+                progress_cb(done, len(jobs))
     return results

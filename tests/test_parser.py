@@ -14,7 +14,7 @@ from matrix2d.core.models import SampleMeta, WarpageData
 # ---- parse_filename ----------------------------------------------------------
 
 def test_parse_basic():
-    m = parse_filename("WAFER_PT0012_000125s(25C).dat", "TOP")
+    m = parse_filename("WAFER_PT0012_00125s(25C).dat", "TOP")
     assert isinstance(m, SampleMeta)
     assert m.title == "WAFER"
     assert m.sample_no == 12
@@ -24,60 +24,61 @@ def test_parse_basic():
 
 
 def test_parse_leading_zeros():
-    m = parse_filename("A_PT0001_000009s(5C).csv", "BTM")
+    m = parse_filename("A_PT0001_00009s(5C).csv", "BTM")
     assert m.sample_no == 1
     assert m.time_s == 9
     assert m.temp_c == 5
 
 
 def test_parse_three_digit_temp():
-    m = parse_filename("A_PT1234_123456s(260C).txt", "TOP")
+    m = parse_filename("A_PT1234_12345s(260C).txt", "TOP")
     assert m.sample_no == 1234
-    assert m.time_s == 123456
+    assert m.time_s == 12345
     assert m.temp_c == 260
 
 
 def test_parse_spaces_in_title():
-    m = parse_filename("WAFER TOP 2024_PT0003_000060s(240C).dat", "TOP")
+    m = parse_filename("WAFER TOP 2024_PT0003_00060s(240C).dat", "TOP")
     assert m.title == "WAFER TOP 2024"
     assert m.sample_no == 3
 
 
 def test_parse_title_containing_underscore_and_pt():
     # Title itself contains underscores; split at the LAST _PT.
-    m = parse_filename("LOT_A_PART_PT0007_000011s(25C).dat", "TOP")
+    m = parse_filename("LOT_A_PART_PT0007_00011s(25C).dat", "TOP")
     assert m.title == "LOT_A_PART"
     assert m.sample_no == 7
 
 
 def test_parse_all_extensions():
     for ext in (".dat", ".csv", ".txt"):
-        m = parse_filename("X_PT0002_000010s(30C)" + ext, "TOP")
+        m = parse_filename("X_PT0002_00010s(30C)" + ext, "TOP")
         assert m.sample_no == 2
 
 
 def test_parse_with_directory_prefix():
-    m = parse_filename("/some/dir/X_PT0002_000010s(30C).dat", "GAP", path="p")
+    m = parse_filename("/some/dir/X_PT0002_00010s(30C).dat", "GAP", path="p")
     assert m.sample_no == 2
     assert m.path == "p"
     assert m.kind == "GAP"
 
 
 def test_parse_path_defaults_to_filename():
-    m = parse_filename("X_PT0002_000010s(30C).dat", "TOP")
-    assert m.path == "X_PT0002_000010s(30C).dat"
+    m = parse_filename("X_PT0002_00010s(30C).dat", "TOP")
+    assert m.path == "X_PT0002_00010s(30C).dat"
 
 
 @pytest.mark.parametrize(
     "bad",
     [
         "no_pattern_here.dat",
-        "X_PT12_000010s(30C).dat",       # sample not 4 digits
-        "X_PT0002_00010s(30C).dat",      # time not 6 digits
-        "X_PT0002_000010(30C).dat",      # missing 's'
-        "X_PT0002_000010s(30).dat",      # missing 'C'
-        "X_PT0002_000010s(3000C).dat",   # temp too many digits
-        "X_PT0002_000010s25C.dat",       # missing parens
+        "X_PT12_00010s(30C).dat",       # sample not 4 digits
+        "X_PT0002_0010s(30C).dat",      # time only 4 digits
+        "X_PT0002_000010s(30C).dat",    # time 6 digits (old format)
+        "X_PT0002_00010(30C).dat",      # missing 's'
+        "X_PT0002_00010s(30).dat",      # missing 'C'
+        "X_PT0002_00010s(3000C).dat",   # temp too many digits
+        "X_PT0002_00010s25C.dat",       # missing parens
     ],
 )
 def test_parse_bad_names_raise(bad):
@@ -88,36 +89,55 @@ def test_parse_bad_names_raise(bad):
 # ---- parse_gap_filename --------------------------------------------------------
 
 def test_parse_gap_basic():
-    m = parse_gap_filename("TOP1-BTM12_H250.txt")
+    m = parse_gap_filename("TEST-C25_TOP3-BTM8.txt")
     assert m.kind == "GAP"
-    assert m.sample_no == 1
-    assert m.btm_no == 12
-    assert m.phase == "H"
-    assert m.temp_c == 250
+    assert m.sample_no == 3
+    assert m.btm_no == 8
+    assert m.phase == "C"
+    assert m.temp_c == 25
     assert m.time_s == 0
-    assert m.title == "TOP1-BTM12_H250"
+    assert m.title == "TEST-C25_TOP3-BTM8"
 
 
-def test_parse_gap_cooling_and_duplicate_suffix():
-    m = parse_gap_filename("TOP12-BTM3_C85_2.dat")
-    assert (m.sample_no, m.btm_no, m.phase, m.temp_c) == (12, 3, "C", 85)
+def test_parse_gap_heating_and_duplicate_suffix():
+    m = parse_gap_filename("MY RUN-H240_TOP12-BTM3_2.dat")
+    assert (m.sample_no, m.btm_no, m.phase, m.temp_c) == (12, 3, "H", 240)
+
+
+def test_parse_gap_prefix_with_dashes_and_underscores():
+    m = parse_gap_filename("LOT-A_2026-H250_TOP1-BTM2.txt")
+    assert (m.sample_no, m.btm_no, m.phase, m.temp_c) == (1, 2, "H", 250)
 
 
 def test_parse_gap_with_directory_and_path():
-    m = parse_gap_filename("/x/y/TOP2-BTM4_H240.txt", path="p")
+    m = parse_gap_filename("/x/y/TEST-H240_TOP2-BTM4.txt", path="p")
     assert m.path == "p"
     assert m.sample_no == 2
+
+
+def test_parse_gap_legacy_format():
+    m = parse_gap_filename("TOP1-BTM12_H250.txt")
+    assert m.kind == "GAP"
+    assert (m.sample_no, m.btm_no, m.phase, m.temp_c) == (1, 12, "H", 250)
+
+
+def test_parse_gap_legacy_duplicate_suffix():
+    m = parse_gap_filename("TOP12-BTM3_C85_2.dat")
+    assert (m.sample_no, m.btm_no, m.phase, m.temp_c) == (12, 3, "C", 85)
 
 
 @pytest.mark.parametrize(
     "bad",
     [
         "random.txt",
-        "TOP1_BTM2_H240.txt",       # underscore, not dash
-        "TOP1-BTM2_X240.txt",       # phase not H/C
-        "TOP1-BTM2_H2400.txt",      # temp too many digits
-        "TOP1-BTM2_H.txt",          # missing temp
-        "A_PT0001_000011s(25C).dat",  # measurement format, not gap
+        "TEST-X25_TOP3-BTM8.txt",   # phase not H/C
+        "TEST-C2500_TOP3-BTM8.txt",  # temp too many digits
+        "-C25_TOP3-BTM8.txt",       # empty prefix
+        "TEST-C25_TOP3.txt",        # missing BTM
+        "TOP1_BTM2_H240.txt",       # legacy: underscore, not dash
+        "TOP1-BTM2_X240.txt",       # legacy: phase not H/C
+        "TOP1-BTM2_H.txt",          # legacy: missing temp
+        "A_PT0001_00011s(25C).dat",  # measurement format, not gap
     ],
 )
 def test_parse_gap_bad_names_raise(bad):
@@ -203,7 +223,7 @@ def test_blank_threshold_value():
 # ---- load_warpage ------------------------------------------------------------
 
 def test_load_warpage(tmp_path):
-    p = tmp_path / "WAFER_PT0005_000060s(240C).dat"
+    p = tmp_path / "WAFER_PT0005_00060s(240C).dat"
     p.write_text("1.0,2.0\n3.0,4.0\n")
     wd = load_warpage(str(p), "TOP")
     assert isinstance(wd, WarpageData)
@@ -213,7 +233,7 @@ def test_load_warpage(tmp_path):
 
 
 def test_load_warpage_gap_naming(tmp_path):
-    p = tmp_path / "TOP1-BTM12_H250.txt"
+    p = tmp_path / "TEST-H250_TOP1-BTM12.txt"
     p.write_text("1.0\t2.0\n3.0\t4.0\n")
     wd = load_warpage(str(p), "GAP")
     assert wd.meta.kind == "GAP"
@@ -223,8 +243,18 @@ def test_load_warpage_gap_naming(tmp_path):
     assert wd.values.shape == (2, 2)
 
 
+def test_load_warpage_gap_legacy_naming(tmp_path):
+    p = tmp_path / "TOP1-BTM12_H250.txt"
+    p.write_text("1.0\t2.0\n3.0\t4.0\n")
+    wd = load_warpage(str(p), "GAP")
+    assert wd.meta.kind == "GAP"
+    assert wd.meta.sample_no == 1
+    assert wd.meta.btm_no == 12
+    assert wd.meta.phase == "H"
+
+
 def test_load_warpage_gap_legacy_fallback(tmp_path):
-    p = tmp_path / "G_PT0004_000060s(240C).dat"
+    p = tmp_path / "G_PT0004_00060s(240C).dat"
     p.write_text("1.0\n")
     wd = load_warpage(str(p), "GAP")
     assert wd.meta.sample_no == 4
