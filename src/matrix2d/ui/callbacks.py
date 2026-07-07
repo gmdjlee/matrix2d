@@ -864,7 +864,8 @@ def register_callbacks(app):
                                    top_transform=top_cfg,
                                    btm_transform=btm_cfg,
                                    out_prefix=out_prefix,
-                                   progress_cb=_on_progress)
+                                   progress_cb=_on_progress,
+                                   retain_gap=False)
             # Refresh the gap cache here, in the worker, exactly once per run.
             # The poller may publish the same outcome several times (see the
             # polling-contract note above), so it must stay side-effect free.
@@ -872,9 +873,7 @@ def register_callbacks(app):
             # cache when a run fails.
             helpers.clear_gaps()
             for r in results:
-                helpers.cache_gap(
-                    r.job.out_name,
-                    np.asarray(r.result.gap, dtype="float64"))
+                helpers.register_gap(r.job.out_name, r.out_path)
             with _COMPUTE_LOCK:
                 _COMPUTE["results"] = results
             logger.info("Gap compute finished: %d result(s)", len(results))

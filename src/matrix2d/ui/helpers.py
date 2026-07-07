@@ -6,6 +6,7 @@ single-user Dash app (no concurrency concerns worth engineering for here).
 """
 
 import re
+from collections import OrderedDict
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -237,11 +238,14 @@ def transformed_matrix(meta_dict: dict, config: Optional[TransformConfig]
 # ---------------------------------------------------------------------------
 # Matrix caches.
 #   _MATRIX_CACHE: keyed by file path -> ndarray (loaded input datasets)
-#   _GAP_CACHE:    keyed by out_name  -> ndarray (computed gap results)
+#   _GAP_PATHS / _GAP_LRU: keyed by out_name -> saved OUT path / lazy-loaded
+#     ndarray, bounded to the last few accessed (see register_gap/get_gap).
 # ---------------------------------------------------------------------------
 
 _MATRIX_CACHE = {}  # type: Dict[str, np.ndarray]
-_GAP_CACHE = {}     # type: Dict[str, np.ndarray]
+_GAP_PATHS = {}          # type: Dict[str, str]  # out_name -> saved OUT file path
+_GAP_LRU = OrderedDict()  # type: "OrderedDict[str, np.ndarray]"  # bounded array cache
+_GAP_LRU_MAX = 8
 
 
 def get_matrix(path: str) -> Optional[np.ndarray]:
@@ -263,13 +267,34 @@ def load_matrix(meta_dict: dict) -> np.ndarray:
     return arr
 
 
-def cache_gap(out_name: str, gap: np.ndarray) -> None:
-    _GAP_CACHE[out_name] = np.asarray(gap, dtype="float64")
+def register_gap(out_name: str, out_path: str) -> None:
+    """Register where a computed gap was saved; the array is loaded lazily."""
+    _GAP_PATHS[out_name] = out_path
 
 
-def get_gap(out_name: str) -> Optional[np.ndarray]:
-    return _GAP_CACHE.get(out_name)
+def get_gap(out_name: str) -> "Optional[np.ndarray]":
+    """Return the gap array for out_name, loading it from its saved OUT file
+    on demand and caching the last few in a bounded LRU. Values reflect the
+    saved file precision (%.2f). Returns None if unknown or unreadable."""
+    arr = _GAP_LRU.get(out_name)
+    if arr is not None:
+        _GAP_LRU.move_to_end(out_name)
+        return arr
+    path = _GAP_PATHS.get(out_name)
+    if path is None:
+        return None
+    from matrix2d.core.parser import load_matrix as _load_gap_file
+    try:
+        arr = np.asarray(_load_gap_file(path), dtype="float64")
+    except (ValueError, OSError):
+        return None
+    _GAP_LRU[out_name] = arr
+    _GAP_LRU.move_to_end(out_name)
+    while len(_GAP_LRU) > _GAP_LRU_MAX:
+        _GAP_LRU.popitem(last=False)
+    return arr
 
 
 def clear_gaps() -> None:
-    _GAP_CACHE.clear()
+    _GAP_PATHS.clear()
+    _GAP_LRU.clear()

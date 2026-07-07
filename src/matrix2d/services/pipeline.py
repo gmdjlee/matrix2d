@@ -20,6 +20,45 @@ from .repository import load_data, save_matrix, scan_folder
 logger = logging.getLogger(__name__)
 
 
+def _make_matrix_loader(cfg, seed):
+    """Build a memoized (load + transform) accessor for one side (TOP/BTM).
+
+    Args:
+        cfg: Optional TransformConfig applied to each loaded matrix.
+        seed: Dict[str, np.ndarray] of pre-loaded RAW matrices (from the
+            scan-folder validation pass), consumed lazily so each file's
+            raw bytes are read from disk at most once.
+
+    Returns:
+        A ``load(meta) -> np.ndarray`` callable, memoized per path so each
+        unique file is loaded and transformed exactly once across all
+        pairings. Load/transform errors are cached and re-raised so a bad
+        file is not retried per job (preserves the per-job skip-and-continue
+        semantics of run_pipeline).
+    """
+    transformed = {}  # type: Dict[str, Tuple[Optional[np.ndarray], Optional[Exception]]]
+
+    def load(meta):
+        path = meta.path
+        cached = transformed.get(path)
+        if cached is None:
+            try:
+                raw = seed.pop(path, None)
+                if raw is None:
+                    raw = load_data(meta).values
+                vals = apply_transform(raw, cfg)
+                cached = (vals, None)
+            except (ValueError, OSError) as exc:
+                cached = (None, exc)
+            transformed[path] = cached
+        vals, exc = cached
+        if exc is not None:
+            raise exc
+        return vals
+
+    return load
+
+
 @dataclass
 class GapJob:
     """A planned pairing of a TOP and BTM measurement to compute a gap."""
@@ -143,6 +182,7 @@ def run_pipeline(
     btm_transform: "Optional[TransformConfig]" = None,
     out_prefix: str = DEFAULT_GAP_PREFIX,
     progress_cb: "Optional[Callable[[int, int], None]]" = None,
+    retain_gap: bool = True,
 ) -> "List[GapJobResult]":
     """Run the full gap pipeline over two folders of measurements.
 
@@ -170,6 +210,12 @@ def run_pipeline(
         progress_cb: Optional ``callback(done, total)`` invoked once with
             ``(0, total)`` after planning and again after every job
             (successful or failed). Exceptions from the callback propagate.
+        retain_gap: when True (default) each returned GapJobResult carries
+            the full gap array in result.gap; when False the array is
+            dropped after it is saved to disk (result.gap is None,
+            result.offset/contact_index kept) so a large batch does not
+            accumulate every gap in memory. The gap file on disk is written
+            regardless.
 
     Returns:
         A list of GapJobResult for the successful jobs.
@@ -184,9 +230,14 @@ def run_pipeline(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    tops = scan_folder(top_dir, "TOP")
-    btms = scan_folder(btm_dir, "BTM")
+    top_seed = {}  # type: Dict[str, np.ndarray]
+    btm_seed = {}  # type: Dict[str, np.ndarray]
+    tops = scan_folder(top_dir, "TOP", matrix_cache=top_seed)
+    btms = scan_folder(btm_dir, "BTM", matrix_cache=btm_seed)
     jobs = plan_jobs(tops, btms, out_prefix=out_prefix)
+
+    top_load = _make_matrix_loader(top_transform, top_seed)
+    btm_load = _make_matrix_loader(btm_transform, btm_seed)
 
     if progress_cb is not None:
         progress_cb(0, len(jobs))
@@ -194,16 +245,8 @@ def run_pipeline(
     results: List[GapJobResult] = []
     for done, job in enumerate(jobs, start=1):
         try:
-            top_data = load_data(job.top)
-            btm_data = load_data(job.btm)
-
-            top_vals = top_data.values
-            btm_vals = btm_data.values
-
-            # Orientation transforms run before resize so the reference choice
-            # and the resize grid see the final orientation.
-            top_vals = apply_transform(top_vals, top_transform)
-            btm_vals = apply_transform(btm_vals, btm_transform)
+            top_vals = top_load(job.top)
+            btm_vals = btm_load(job.btm)
 
             # Resolve the effective reference per job. AUTO picks the dataset
             # with more elements (rotation changes dims but not size); tie -> TOP.
@@ -236,8 +279,16 @@ def run_pipeline(
             out_path = os.path.join(out_dir, job.out_name)
             save_matrix(out_path, gap_res.gap)
 
+            if retain_gap:
+                kept = gap_res
+            else:
+                kept = GapResult(
+                    gap=None,
+                    offset=gap_res.offset,
+                    contact_index=gap_res.contact_index,
+                )
             results.append(
-                GapJobResult(job=job, result=gap_res, out_path=out_path)
+                GapJobResult(job=job, result=kept, out_path=out_path)
             )
         except (ValueError, OSError) as exc:
             logger.error(
