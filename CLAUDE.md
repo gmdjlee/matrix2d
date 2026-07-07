@@ -13,6 +13,12 @@ python run_app.py                     # start Dash SPA at http://127.0.0.1:8050
 python scripts/make_sample_data.py    # generate demo_data/{TOP,BTM,GAP,OUT}
 ```
 
+Runtime log: `logs/matrix2d.log` (rotating 2MB×5; `MATRIX2D_LOG_DIR` /
+`MATRIX2D_LOG_LEVEL` override; configured by `matrix2d/logging_setup.py`
+from run_app.py). Dash debug mode is opt-in via `MATRIX2D_DEBUG=1` — its
+werkzeug reloader/hot-reload restarts the process and refreshes the page
+mid-run, killing background scan/compute threads and wiping dcc.Store state.
+
 Python 3.8.10 — do NOT use `X | Y` union syntax or `match`. Use
 `typing.Optional/List/Tuple`. Deps pinned in requirements.txt
 (dash 2.17.1, plotly 5.24.1, scipy 1.10.1, numpy 1.24.4, kaleido 0.2.1).
@@ -106,6 +112,18 @@ charts.py stays Dash-free so it ports directly to the React migration.
   the progress bar and publishes results when done (duplicate outputs use
   `allow_duplicate=True`). `run_pipeline(progress_cb=...)` reports
   (done, total) per job.
+- Polling contract (scan AND compute): the worker's outcome stays in the
+  state dict until the NEXT run starts — pollers must read it
+  NON-destructively and republish every tick until the publish response
+  disables the interval. dash-renderer discards responses whose
+  `n_intervals` changed mid-flight, so a consume-once poller can lose the
+  only response carrying the results (progress bar then hangs forever).
+  Publishing must therefore be side-effect free: gap-cache refresh happens
+  in the worker, not the poller. `gap-progress-interval` lives at the layout
+  ROOT (not in the Gap tab) so tab switches never pause/unmount the poller.
+- Worker threads must never die silently: wrap the body so any exception is
+  logged (`logger.exception`) AND published to the UI error output;
+  `logging_setup.py` also hooks `threading.excepthook` as a safety net.
 - Gap tab layout: charts (inspect dropdown + 2D + 3D) on the LEFT, result
   table on the RIGHT; `.table-wrap` scrolls internally (max-height, sticky
   header) instead of the page.

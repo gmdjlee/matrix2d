@@ -290,12 +290,13 @@ def _tab_gap() -> html.Div:
             html.Button("Save All Images (2D+3D)", id="btn-export-all-gaps",
                         n_clicks=0, className="btn"),
         ]),
-        # progress bar for the background compute; polled by the interval
+        # progress bar for the background compute; polled by the root-level
+        # gap-progress-interval (kept outside this tab so switching tabs
+        # mid-compute does not unmount the poller)
         html.Div(className="progress-outer", children=[
             html.Div(id="gap-progress-bar", className="progress-inner"),
         ]),
         html.Div(id="gap-progress-label", className="status"),
-        dcc.Interval(id="gap-progress-interval", interval=400, disabled=True),
         html.Div(id="export-all-status", className="status"),
         html.Div(id="gap-error", className="error"),
         # charts on the left, result list on the right (table scrolls itself)
@@ -330,6 +331,11 @@ def build_layout() -> html.Div:
         # ---- stores ----
         dcc.Store(id="store-metas", data={"TOP": [], "BTM": [], "GAP": []}),
         dcc.Store(id="store-gaps", data=[]),  # list of result summary dicts
+
+        # poller for the background gap compute. Lives at the root (not in the
+        # Gap tab) so that leaving the tab while a compute runs cannot pause
+        # or kill the polling that publishes the results.
+        dcc.Interval(id="gap-progress-interval", interval=400, disabled=True),
 
         # ---- sidebar ----
         html.Div(className="sidebar", children=[

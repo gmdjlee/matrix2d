@@ -14,6 +14,7 @@ Dataset selection model:
 """
 
 import dataclasses
+import logging
 import os
 import threading
 import traceback
@@ -24,6 +25,8 @@ from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.ui import charts, helpers
 from matrix2d.ui.dialogs import pick_folder
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -37,8 +40,8 @@ _COMPUTE = {
     "running": False,
     "done": 0,
     "total": 0,
-    "results": None,   # List[GapJobResult] on success (consumed by the poller)
-    "error": None,     # traceback string on failure (consumed by the poller)
+    "results": None,   # List[GapJobResult] on success
+    "error": None,     # traceback string on failure
 }
 
 # Background folder-scan state, mirroring the gap-compute pattern above. The
@@ -50,8 +53,17 @@ _SCAN = {
     "done": 0,
     "total": 0,
     "result": None,    # {"TOP": [...], "BTM": [...], "GAP": [...]} of dicts
-    "errors": None,    # list of error strings (consumed by the poller)
+    "errors": None,    # list of error strings
 }
+
+# NOTE on the polling contract: the worker's outcome (result/error) is kept in
+# the state dict until the NEXT run starts — the poller must NOT clear it on
+# read. The interval can tick faster than a callback round-trip, and
+# dash-renderer discards a response whose n_intervals input changed while the
+# request was in flight. With a destructive read, the one discarded response
+# could carry the only copy of the results and the UI would hang on a full
+# progress bar forever (this was a real bug). Publishing is idempotent, so
+# re-sending the outcome every tick until the interval is switched off is safe.
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +363,9 @@ def register_callbacks(app):
         errors = []
         specs = [("TOP", top_dir), ("BTM", btm_dir), ("GAP", gap_dir)]
 
+        logger.info("Scan started: TOP=%r BTM=%r GAP=%r",
+                    top_dir, btm_dir, gap_dir)
+
         # pre-count files across all set folders for one grand total
         active = [(k, f) for k, f in specs if f]
         try:
@@ -361,7 +376,8 @@ def register_callbacks(app):
                 try:
                     grand_total += len(list_data_files(folder))
                 except Exception:  # noqa: BLE001 - count failure -> scan reports it
-                    pass
+                    logger.warning("Scan pre-count failed for %s folder %r",
+                                   kind, folder, exc_info=True)
             with _SCAN_LOCK:
                 _SCAN["total"] = grand_total
 
@@ -381,14 +397,21 @@ def register_callbacks(app):
                         errors.append(
                             "{0}: 데이터 없음 (no valid data files)".format(kind))
                 except Exception as exc:  # noqa: BLE001 - surface any core error
+                    logger.exception("Scan failed for %s folder %r", kind, folder)
                     errors.append("{kind}: {exc}".format(kind=kind, exc=exc))
-
+        except Exception as exc:  # noqa: BLE001 - never lose the outcome
+            # Without this, an unexpected error would kill the thread before
+            # "result" is published and the UI would wait forever.
+            logger.exception("Scan worker crashed")
+            errors.append("scan worker crashed: {0}".format(exc))
+        finally:
             with _SCAN_LOCK:
                 _SCAN["result"] = result
                 _SCAN["errors"] = errors
-        finally:
-            with _SCAN_LOCK:
                 _SCAN["running"] = False
+            logger.info("Scan finished: TOP=%d BTM=%d GAP=%d, %d error(s)",
+                        len(result["TOP"]), len(result["BTM"]),
+                        len(result["GAP"]), len(errors))
 
     @app.callback(
         Output("scan-progress-interval", "disabled"),
@@ -407,12 +430,14 @@ def register_callbacks(app):
                     "Set at least one of TOP / BTM / GAP folders.")
         with _SCAN_LOCK:
             if _SCAN["running"]:
+                logger.info("Scan request ignored: a scan is already running")
                 return no_update, no_update, no_update, no_update
             _SCAN.update(running=True, done=0, total=0,
                          result=None, errors=None)
         threading.Thread(
             target=_scan_worker,
             args=(top_dir, btm_dir, gap_dir),
+            name="scan-worker",
             daemon=True,
         ).start()
         return False, True, {"width": "0%"}, "Scanning..."
@@ -432,9 +457,6 @@ def register_callbacks(app):
             running = _SCAN["running"]
             done, total = _SCAN["done"], _SCAN["total"]
             result, errors = _SCAN["result"], _SCAN["errors"]
-            if not running:  # consume the outcome exactly once
-                _SCAN["result"] = None
-                _SCAN["errors"] = None
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
@@ -445,9 +467,12 @@ def register_callbacks(app):
             return (no_update, no_update, no_update, no_update, bar, label)
 
         if result is None:
-            # nothing pending (stale tick after the outcome was consumed)
+            # no outcome pending (e.g. a tick right after a fresh page load)
+            logger.debug("Scan poll: no pending outcome, disabling interval")
             return (no_update, no_update, True, False, no_update, no_update)
 
+        logger.info("Scan poll: publishing result to UI (%d error(s))",
+                    len(errors or []))
         counts = "  ".join(
             "{k}={n}".format(k=k, n=len(result[k])) for k in ("TOP", "BTM", "GAP")
         )
@@ -576,6 +601,7 @@ def register_callbacks(app):
             fig_btm = _side_fig(btm_vals, btm_entry, btm_msg)
             return fig_top, fig_btm, resize_err
         except Exception:  # noqa: BLE001
+            logger.exception("2D render failed")
             return (_empty_fig(), _empty_fig(),
                     "Render error: " + traceback.format_exc(limit=2))
 
@@ -808,8 +834,10 @@ def register_callbacks(app):
             err = ""
             if problems:
                 err = "Skipped / degraded: " + ", ".join(problems)
+                logger.warning("3D render skipped/degraded datasets: %s", err)
             return fig, err
         except Exception:  # noqa: BLE001
+            logger.exception("3D render failed")
             return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
@@ -827,6 +855,9 @@ def register_callbacks(app):
                 _COMPUTE["done"] = done
                 _COMPUTE["total"] = total
 
+        logger.info("Gap compute started: TOP=%r BTM=%r OUT=%r reference=%s "
+                    "prefix=%r", top_dir, btm_dir, out_dir, reference,
+                    out_prefix)
         try:
             results = run_pipeline(top_dir, btm_dir, out_dir,
                                    reference=reference,
@@ -834,9 +865,21 @@ def register_callbacks(app):
                                    btm_transform=btm_cfg,
                                    out_prefix=out_prefix,
                                    progress_cb=_on_progress)
+            # Refresh the gap cache here, in the worker, exactly once per run.
+            # The poller may publish the same outcome several times (see the
+            # polling-contract note above), so it must stay side-effect free.
+            # Clearing only after success keeps store-gaps consistent with the
+            # cache when a run fails.
+            helpers.clear_gaps()
+            for r in results:
+                helpers.cache_gap(
+                    r.job.out_name,
+                    np.asarray(r.result.gap, dtype="float64"))
             with _COMPUTE_LOCK:
                 _COMPUTE["results"] = results
+            logger.info("Gap compute finished: %d result(s)", len(results))
         except Exception:  # noqa: BLE001
+            logger.exception("Gap compute pipeline crashed")
             with _COMPUTE_LOCK:
                 _COMPUTE["error"] = traceback.format_exc(limit=3)
         finally:
@@ -865,6 +908,7 @@ def register_callbacks(app):
                     {"width": "0%"}, "")
         with _COMPUTE_LOCK:
             if _COMPUTE["running"]:
+                logger.info("Compute request ignored: already running")
                 return no_update, no_update, no_update, no_update, no_update
             _COMPUTE.update(running=True, done=0, total=0,
                             results=None, error=None)
@@ -873,6 +917,7 @@ def register_callbacks(app):
             target=_compute_worker,
             args=(top_dir, btm_dir, out_dir, reference,
                   top_cfg, btm_cfg, out_prefix or ""),
+            name="compute-worker",
             daemon=True,
         ).start()
         return False, True, "", {"width": "0%"}, "Scanning folders..."
@@ -895,9 +940,6 @@ def register_callbacks(app):
             running = _COMPUTE["running"]
             done, total = _COMPUTE["done"], _COMPUTE["total"]
             results, error = _COMPUTE["results"], _COMPUTE["error"]
-            if not running:  # consume the outcome exactly once
-                _COMPUTE["results"] = None
-                _COMPUTE["error"] = None
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
@@ -909,23 +951,21 @@ def register_callbacks(app):
                     no_update, no_update, no_update, bar, label)
 
         if error is not None:
+            logger.error("Compute poll: publishing pipeline error to UI:\n%s",
+                         error)
             return (no_update, no_update, no_update, no_update,
                     True, False, "Pipeline error: " + error, bar, "Failed")
         if results is None:
-            # nothing pending (stale tick after the outcome was consumed)
+            # no outcome pending (e.g. a tick right after a fresh page load)
+            logger.debug("Compute poll: no pending outcome, disabling interval")
             return (no_update, no_update, no_update, no_update,
                     True, False, no_update, no_update, no_update)
-
-        # clear the old cache only after the pipeline succeeded, so a failed
-        # run does not leave store-gaps pointing at purged cache entries.
-        helpers.clear_gaps()
+        logger.info("Compute poll: publishing %d result(s) to UI", len(results))
 
         rows = []
         summaries = []
         for r in results:
             job = r.job
-            gap_arr = np.asarray(r.result.gap, dtype="float64")
-            helpers.cache_gap(job.out_name, gap_arr)
             summaries.append({
                 "out_name": job.out_name,
                 "top": os.path.basename(getattr(job.top, "path", "")),
@@ -994,6 +1034,7 @@ def register_callbacks(app):
             fig3d = charts.surface_3d(values, opts, name=name)
             return fig2d, fig3d, ""
         except Exception:  # noqa: BLE001
+            logger.exception("Gap inspect render failed for %r", gap_key)
             return _empty_fig(), _empty_fig(), \
                 "Render error: " + traceback.format_exc(limit=2)
 
@@ -1011,8 +1052,10 @@ def register_callbacks(app):
             fig = charts.go.Figure(fig_dict)
             path = os.path.join(out_dir, default_name)
             fig.write_image(path)  # kaleido backend
+            logger.info("Exported figure -> %s", path)
             return "Saved: " + path
         except Exception:  # noqa: BLE001
+            logger.exception("Figure export failed for %r", default_name)
             return "Export error: " + traceback.format_exc(limit=2)
 
     @app.callback(
@@ -1081,8 +1124,11 @@ def register_callbacks(app):
                 fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))
                 saved += 2
             except Exception as exc:  # noqa: BLE001 - keep exporting the rest
+                logger.exception("Batch image export failed for %r", name)
                 failed.append("{0} ({1})".format(name, exc))
         msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
+        logger.info("Batch image export: %d saved, %d failed -> %s",
+                    saved, len(failed), out_dir)
         if failed:
             msg += " Failed: " + ", ".join(failed)
         return msg

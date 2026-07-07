@@ -27,6 +27,9 @@ htmlcov/
 # Generated demo data
 demo_data/
 
+# Runtime logs
+logs/
+
 # IDE / editor
 .idea/
 .vscode/
