@@ -19,6 +19,11 @@ from .repository import load_data, save_matrix, scan_folder
 
 logger = logging.getLogger(__name__)
 
+# TOP and BTM are independent measurements whose temperature readings can
+# differ slightly for the same physical point. Two temperatures within this
+# many degrees Celsius are treated as the same temperature point when pairing.
+TEMP_TOLERANCE_C = 2
+
 
 def _make_matrix_loader(cfg, seed):
     """Build a memoized (load + transform) accessor for one side (TOP/BTM).
@@ -107,6 +112,30 @@ def _phase_map(
     return result
 
 
+def _match_btm(
+    target_temp: int, phase: str,
+    btm_pmap: "Dict[Tuple[int, str], SampleMeta]",
+) -> "Optional[SampleMeta]":
+    """Find the BTM meta of ``phase`` nearest to ``target_temp`` within tol.
+
+    Returns the BTM SampleMeta whose temperature is closest to ``target_temp``
+    and within ``TEMP_TOLERANCE_C`` degrees, or None if none qualifies. On a
+    tie in distance, the lower BTM temperature wins (deterministic).
+    """
+    best = None  # type: Optional[SampleMeta]
+    best_d = None  # type: Optional[int]
+    best_temp = None  # type: Optional[int]
+    for (btemp, bphase), bmeta in btm_pmap.items():
+        if bphase != phase:
+            continue
+        d = abs(btemp - target_temp)
+        if d > TEMP_TOLERANCE_C:
+            continue
+        if best is None or d < best_d or (d == best_d and btemp < best_temp):
+            best, best_d, best_temp = bmeta, d, btemp
+    return best
+
+
 def plan_jobs(
     tops: "List[SampleMeta]", btms: "List[SampleMeta]",
     out_prefix: str = DEFAULT_GAP_PREFIX,
@@ -114,8 +143,11 @@ def plan_jobs(
     """Plan gap jobs for every TOP-sample x BTM-sample combination.
 
     For each (top_sample_no, btm_sample_no) pair, and for each temperature
-    present in both samples' file sets, TOP-H is paired with BTM-H and TOP-C
-    with BTM-C (a pairing is skipped when the counterpart phase is missing).
+    present in the TOP sample's file set, the BTM file of the matching phase
+    whose temperature is closest and within ``TEMP_TOLERANCE_C`` degrees is
+    paired with it (TOP-H with BTM-H, TOP-C with BTM-C). A pairing is skipped
+    when no BTM file of that phase falls within tolerance. The output name uses
+    the TOP sample's temperature.
 
     Phase is computed per sample from that sample's own file list. Output names
     are deduplicated by appending _2, _3, ... on collision.
@@ -140,17 +172,17 @@ def plan_jobs(
         for btm_no in sorted(btm_groups.keys()):
             btm_pmap = _phase_map(btm_groups[btm_no])
 
-            temps_top = set(t for (t, _p) in top_pmap.keys())
-            temps_btm = set(t for (t, _p) in btm_pmap.keys())
-            common_temps = sorted(temps_top & temps_btm)
+            temps_top = sorted(set(t for (t, _p) in top_pmap.keys()))
 
-            for temp in common_temps:
+            for temp in temps_top:
                 for phase in ("H", "C"):
                     key = (temp, phase)
-                    if key not in top_pmap or key not in btm_pmap:
+                    if key not in top_pmap:
                         continue
                     top_meta = top_pmap[key]
-                    btm_meta = btm_pmap[key]
+                    btm_meta = _match_btm(temp, phase, btm_pmap)
+                    if btm_meta is None:
+                        continue
                     base_name = gap_filename(
                         top_meta, btm_meta, phase, prefix=out_prefix)
 

@@ -85,8 +85,11 @@ charts.py stays Dash-free so it ports directly to the React migration.
   tab-delimited, NaN written as `nan`. Duplicate names get `_2`, `_3`.
   Prefix = Gap tab "Output name prefix" input; `naming.sanitize_prefix`
   strips filename-illegal chars, blank → `GAP`.
-- **Pairing**: every TOP-sample × BTM-sample combination; per shared
-  temperature, H pairs with H and C with C.
+- **Pairing**: every TOP-sample × BTM-sample combination; per TOP
+  temperature, H pairs with H and C with C. TOP/BTM temps within ±2°C
+  (`pipeline.TEMP_TOLERANCE_C`) count as the same temperature point —
+  matched to the nearest BTM temp in range (tie → lower BTM temp); output
+  name uses the TOP temp. Phase is still per-sample from own peak time.
 
 ## Conventions
 

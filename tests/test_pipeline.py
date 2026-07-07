@@ -81,6 +81,47 @@ def test_plan_jobs_dedup_suffix():
     assert len(names) == len(set(names))  # all unique
 
 
+def test_plan_jobs_temp_tolerance_pairs_within_2c():
+    # TOP 175C (110s, H) pairs with BTM 174C (98s, H): |175-174|=1 <= 2.
+    # TOP 176C (1125s, C) pairs with BTM 176C (1320s, C): exact, both cooling.
+    # Peak is the 260C file present on both samples.
+    tops = [
+        _meta(1, 110, 175, "TOP"),
+        _meta(1, 500, 260, "TOP"),
+        _meta(1, 1125, 176, "TOP"),
+    ]
+    btms = [
+        _meta(2, 98, 174, "BTM"),
+        _meta(2, 500, 260, "BTM"),
+        _meta(2, 1320, 176, "BTM"),
+    ]
+    jobs = plan_jobs(tops, btms)
+    names = sorted(j.out_name for j in jobs)
+    # Output temperature follows the TOP reading.
+    assert "GAP-H175_TOP1-BTM2.txt" in names
+    assert "GAP-C176_TOP1-BTM2.txt" in names
+
+
+def test_plan_jobs_temp_tolerance_excludes_beyond_2c():
+    # |180 - 177| = 3 > 2 -> no pairing at that temperature.
+    tops = [_meta(1, 110, 180, "TOP"), _meta(1, 500, 260, "TOP")]
+    btms = [_meta(2, 98, 177, "BTM"), _meta(2, 500, 260, "BTM")]
+    jobs = plan_jobs(tops, btms)
+    names = [j.out_name for j in jobs]
+    assert all("180" not in n and "177" not in n for n in names)
+
+
+def test_plan_jobs_temp_tolerance_picks_nearest_btm():
+    # TOP 176 is within 2 of both BTM 175 (d=1) and BTM 178 (d=2); nearest wins.
+    tops = [_meta(1, 110, 176, "TOP")]
+    btms = [_meta(2, 108, 175, "BTM"), _meta(2, 112, 178, "BTM")]
+    jobs = plan_jobs(tops, btms)
+    # 176 vs 175 (d=1) beats 176 vs 178 (d=2) -> pairs with BTM 175 sample 2.
+    assert len(jobs) == 1
+    assert jobs[0].btm.temp_c == 175
+    assert jobs[0].out_name == "GAP-H176_TOP1-BTM2.txt"
+
+
 # ---- run_pipeline end-to-end -------------------------------------------------
 
 def _make_surface(rows, cols, base, hole=True):
