@@ -35,6 +35,11 @@ BLANK_THRESHOLD = 2000.0
 
 _VALID_EXTS = (".dat", ".csv", ".txt")
 
+# Default max input file size (MB) before load_matrix refuses it. Generous
+# on purpose — this guards against pathological files, not normal large
+# warpage matrices.
+MAX_FILE_MB_DEFAULT = 512
+
 
 def parse_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
     """Parse a measurement filename into a SampleMeta.
@@ -154,6 +159,26 @@ def _parse_cell(token: str) -> float:
     return val
 
 
+def _max_file_bytes() -> int:
+    """Max input file size in bytes before load_matrix refuses it.
+
+    Controlled by MATRIX2D_MAX_FILE_MB (megabytes; falls back to
+    MAX_FILE_MB_DEFAULT on a missing/invalid value; a value <= 0 disables
+    the guard by returning a very large limit).
+    """
+    raw = os.environ.get("MATRIX2D_MAX_FILE_MB")
+    if raw is None:
+        mb = MAX_FILE_MB_DEFAULT
+    else:
+        try:
+            mb = int(raw)
+        except ValueError:
+            mb = MAX_FILE_MB_DEFAULT
+    if mb <= 0:
+        return 2 ** 63 - 1
+    return mb * 1024 * 1024
+
+
 def load_matrix(path: str) -> np.ndarray:
     """Load a 2D numeric matrix from a text file.
 
@@ -168,8 +193,18 @@ def load_matrix(path: str) -> np.ndarray:
         A 2D float64 ndarray.
 
     Raises:
-        ValueError: If the file has no numeric content or a cell is unparseable.
+        ValueError: If the file has no numeric content, a cell is
+            unparseable, or the file exceeds the size guard (see
+            :func:`_max_file_bytes`).
     """
+    size = os.path.getsize(path)
+    limit = _max_file_bytes()
+    if size > limit:
+        raise ValueError(
+            "Matrix file too large: {0} is {1} bytes (limit {2} bytes; "
+            "raise MATRIX2D_MAX_FILE_MB to allow).".format(path, size, limit)
+        )
+
     with open(path, "r", encoding="utf-8") as fh:
         raw_lines = fh.readlines()
 

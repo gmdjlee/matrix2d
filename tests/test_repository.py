@@ -51,6 +51,30 @@ def test_scan_folder_skips_bad_content(tmp_path, caplog):
     assert [m.sample_no for m in metas] == [1]
 
 
+def test_scan_folder_skips_oversize_file(tmp_path, caplog, monkeypatch):
+    import logging
+
+    good = tmp_path / "good_PT0001_00011s(25C).dat"
+    huge = tmp_path / "huge_PT0002_00011s(25C).dat"
+    good.write_text("1,2\n3,4\n")
+    huge.write_text("1,2\n3,4\n")
+
+    real_getsize = os.path.getsize
+
+    def _fake_getsize(path):
+        if os.path.abspath(path) == os.path.abspath(str(huge)):
+            return 10 ** 12
+        return real_getsize(path)
+
+    monkeypatch.setattr("matrix2d.core.parser.os.path.getsize", _fake_getsize)
+
+    with caplog.at_level(logging.WARNING):
+        metas = scan_folder(str(tmp_path), "TOP")
+
+    assert [m.sample_no for m in metas] == [1]
+    assert any("too large" in rec.message for rec in caplog.records)
+
+
 def test_scan_gap_folder_gap_naming(tmp_path):
     (tmp_path / "TEST-H250_TOP1-BTM12.txt").write_text("1,2\n3,4\n")
     (tmp_path / "TEST-C85_TOP2-BTM1.txt").write_text("1,2\n3,4\n")

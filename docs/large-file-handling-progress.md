@@ -21,7 +21,11 @@ status table below.
 | P2 | Shared bounded, mtime-keyed raw-matrix cache (dedupe disk reads) | ✅ DONE | see git log |
 | P1 | Bound pipeline memory (drop unbounded seed + memo) | ✅ DONE | see git log |
 | P4 | Stream `load_matrix` row-wise (cut transient python-float peak) | ✅ DONE | see git log |
-| P6 | Single-file size guard (skip oversize, never abort) | 🔄 IN PROGRESS | — |
+| P6 | Single-file size guard (skip oversize, never abort) | ✅ DONE | see git log |
+
+**All four steps complete.** Full suite: 217 passed. New env knobs:
+`MATRIX2D_RAW_CACHE` (P2, default 128), `MATRIX2D_XFORM_CACHE` (P1, default 64),
+`MATRIX2D_MAX_FILE_MB` (P6, default 512, `<=0` disables).
 
 Status legend: ⬜ TODO · 🔄 IN PROGRESS · ✅ DONE · ⏭️ SKIPPED
 
