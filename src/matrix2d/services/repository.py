@@ -121,3 +121,17 @@ def save_matrix(
     np.savetxt(
         path, arr, fmt=fmt, delimiter=delimiter, newline="\n", encoding="utf-8"
     )
+
+
+def save_text(path: str, text: str) -> None:
+    """Write a text file (utf-8, LF newlines), creating parent dirs.
+
+    Args:
+        path: Output file path.
+        text: Full file contents to write verbatim.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)

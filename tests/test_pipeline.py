@@ -330,6 +330,32 @@ def test_run_pipeline_custom_prefix_in_out_names(tmp_path):
         assert os.path.basename(r.out_path).startswith("TEST-")
 
 
+def test_run_pipeline_writes_summary_file(tmp_path):
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir),
+                           out_prefix="TEST")
+    assert len(results) > 0
+
+    summary_path = out_dir / "TEST.txt"
+    assert summary_path.exists()
+
+    lines = summary_path.read_text(encoding="utf-8").rstrip("\n").split("\n")
+    header = lines[0].split("\t")
+    # First header cell is the (blank) corner; the rest are temp points.
+    assert header[0] == ""
+    assert "H240" in header and "C240" in header
+    # One row per TOP-BTM combo; this fixture has TOP1 x BTM2.
+    row_labels = [ln.split("\t")[0] for ln in lines[1:]]
+    assert row_labels == ["TOP1-BTM2"]
+
+    # The H240 cell holds a finite max gap equal to the saved gap's max.
+    cols = header[1:]
+    cells = dict(zip(cols, lines[1].split("\t")[1:]))
+    r = next(x for x in results if x.job.out_name == "TEST-H240_TOP1-BTM2.txt")
+    assert float(cells["H240"]) == pytest.approx(
+        float(np.nanmax(r.result.gap)), rel=1e-3)
+
+
 def test_run_pipeline_progress_callback(tmp_path):
     top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
     calls = []

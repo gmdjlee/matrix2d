@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+import numpy as np
+
 from ..core.gap import compute_gap
 from ..core.models import GapResult, SampleMeta
 from ..core.naming import (
@@ -12,10 +14,12 @@ from ..core.naming import (
     assign_phase,
     gap_filename,
     peak_time,
+    sanitize_prefix,
 )
 from ..core.resize import resize_pair
+from ..core.summary import build_summary
 from ..core.transform import TransformConfig, apply_transform
-from .repository import load_data, save_matrix, scan_folder
+from .repository import load_data, save_matrix, save_text, scan_folder
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +280,8 @@ def run_pipeline(
         progress_cb(0, len(jobs))
 
     results: List[GapJobResult] = []
+    # (top_no, btm_no, phase, temp_c, max_gap) rows for the summary file.
+    summary_records = []  # type: List[Tuple[int, int, str, int, float]]
     for done, job in enumerate(jobs, start=1):
         try:
             top_vals = top_load(job.top)
@@ -306,6 +312,17 @@ def run_pipeline(
             out_path = os.path.join(out_dir, job.out_name)
             save_matrix(out_path, gap_res.gap)
 
+            # Capture the max gap for the summary before the array may be
+            # dropped (retain_gap=False). All-NaN gap -> NaN (blank cell).
+            if np.isfinite(gap_res.gap).any():
+                max_gap = float(np.nanmax(gap_res.gap))
+            else:
+                max_gap = float("nan")
+            summary_records.append(
+                (job.top.sample_no, job.btm.sample_no, job.phase,
+                 job.top.temp_c, max_gap)
+            )
+
             if retain_gap:
                 kept = gap_res
             else:
@@ -328,4 +345,18 @@ def run_pipeline(
         finally:
             if progress_cb is not None:
                 progress_cb(done, len(jobs))
+
+    # Write the max-gap summary (prefix.txt): temp points x TOP-BTM combos.
+    # A summary failure must never sink an otherwise-successful batch.
+    if summary_records:
+        summary_path = os.path.join(
+            out_dir, sanitize_prefix(out_prefix) + ".txt")
+        try:
+            save_text(summary_path, build_summary(summary_records))
+            logger.info(
+                "Wrote gap summary: %s (%d combo rows)",
+                summary_path, len(set((t, b) for t, b, _, _, _ in summary_records)))
+        except OSError as exc:
+            logger.error("Failed to write gap summary %s: %s", summary_path, exc)
+
     return results
