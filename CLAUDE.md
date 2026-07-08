@@ -65,16 +65,23 @@ charts.py stays Dash-free so it ports directly to the React migration.
 - **Gap**: `diff = TOP - BTM`; `offset = nanmin(diff)`; `gap = diff - offset`.
   Minimum valid gap is exactly 0.0 (first contact point). NaN propagates.
 - **Resize**: values bilinear-interpolated on normalized grid (no warpage
-  distortion; linear ramp survives < 1e-6 error). Blank mask resized by
-  block — any source cell blank in a target cell's footprint → that target
-  cell is blank — so blanks never shrink and keep their shape. Each dataset
-  keeps its OWN resized blank (`mask_mode="own"`), so a resized surface shows
-  only its own blank (no cross); the gap's NaN still comes from both sides
-  via `compute_gap`.
+  distortion; linear ramp survives < 1e-6 error) via `resize_values`. Blank is
+  NOT scaled with the values — it is CROPPED: the source blank keeps its
+  absolute cell extent and is center-aligned onto the target grid (crop when
+  target smaller, pad-valid when larger; odd leftover → trailing edge) by
+  `_center_fit_mask`. `resize_crop_blank` = value resize + own center-fit
+  blank (used by the 3D "Resized" preview per dataset).
+- **Blank matching (TOP/BTM pair)**: `resize_pair(top, btm, ref)` resizes the
+  non-reference side's values to the reference grid, then gives BOTH sides the
+  SAME blank: the UNION of each side's center-fit blank ("match to the larger
+  blank" — per dimension the union spans ≥ the larger blank while keeping each
+  blank's actual shape). Used by `run_pipeline` and the 2D preview. Note: for
+  fully-valid data the gap is unchanged (union = what `compute_gap` already
+  intersects); the real change vs. the old block-resize is crop-fit blanks.
 - **Reference size**: `reference="AUTO"` (default) picks the dataset with
   the SMALLER element count per job (larger resized to smaller, tie → TOP);
   explicit `"TOP"`/`"BTM"` overrides. Reference dataset's grid is
-  authoritative (each side keeps its own resized blank mask).
+  authoritative; both sides share the larger (union) blank.
 - **Transforms** (before resize, order flip → rotate → zero):
   flip = left-right mirror INCLUDING value sign inversion (`-fliplr`);
   rotation = clockwise 90° steps; zero-point = subtract value at a given
@@ -111,10 +118,10 @@ charts.py stays Dash-free so it ports directly to the React migration.
 - Reference-size radio (`gap-reference`) and the Original/Resized display
   radio (`data-show-resized`) live in the Data Options panel. AUTO now picks
   larger→smaller (smallest element count wins, tie → TOP). "Resized"
-  previews data exactly as the pipeline consumes it: 2D resizes the
-  non-reference side of the selected pair; 3D brings all selected TOP/BTM
-  datasets onto one reference grid (GAP/OUT surfaces untouched); each
-  resized dataset keeps its own blank, not the reference's.
+  previews data exactly as the pipeline consumes it: 2D pairs the selected
+  TOP/BTM via `resize_pair` so both show the larger (union) blank; 3D brings
+  all selected TOP/BTM datasets onto one reference grid (GAP/OUT surfaces
+  untouched) via `resize_crop_blank`, each keeping its own crop-fit blank.
 - Scan reads TOP/BTM/GAP/OUT folders; each folder's metas go in its own
   `store-metas` bucket. OUT files use the gap output naming, so they are
   parsed with the GAP format (`scan_folder(out_dir, "GAP")`) but kept under

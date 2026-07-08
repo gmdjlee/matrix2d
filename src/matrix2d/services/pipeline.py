@@ -13,7 +13,7 @@ from ..core.naming import (
     gap_filename,
     peak_time,
 )
-from ..core.resize import resize_to_reference
+from ..core.resize import resize_pair
 from ..core.transform import TransformConfig, apply_transform
 from .repository import load_data, save_matrix, scan_folder
 
@@ -220,10 +220,10 @@ def run_pipeline(
 
     Scans ``top_dir`` and ``btm_dir``, plans jobs, and for each job loads both
     datasets, applies the optional orientation transforms (flip -> rotate ->
-    zero, before any resize), resizes the non-reference dataset to the
-    reference dataset's shape (the resized side keeps its own resized blank
-    mask), computes the gap, and writes it to ``out_dir`` under the job's
-    output name.
+    zero, before any resize), resizes the non-reference dataset's values to the
+    reference dataset's shape and matches both sides to the larger blank (the
+    union of each side's center-fit/cropped blank), computes the gap, and
+    writes it to ``out_dir`` under the job's output name.
 
     Errors in a single job (including transform errors such as a blank/NaN
     zero cell) are logged and collected; they do not abort other jobs.
@@ -232,10 +232,10 @@ def run_pipeline(
         top_dir: Folder of TOP measurements.
         btm_dir: Folder of BTM measurements.
         out_dir: Output folder (created if missing).
-        reference: "AUTO", "TOP" or "BTM" -- which dataset's grid/mask is
+        reference: "AUTO", "TOP" or "BTM" -- which dataset's grid is
             authoritative. With "AUTO", each job picks (after transforms) the
             dataset with the SMALLER element count (larger resized to
-            smaller); ties go to TOP.
+            smaller); ties go to TOP. Both sides share the larger blank.
         top_transform: Optional TransformConfig applied to each TOP matrix.
         btm_transform: Optional TransformConfig applied to each BTM matrix.
         out_prefix: User phrase for output filenames
@@ -288,16 +288,10 @@ def run_pipeline(
             else:
                 effective_ref = reference
 
-            if effective_ref == "TOP":
-                # Resize BTM to TOP's grid; BTM keeps its own resized blank.
-                btm_vals = resize_to_reference(
-                    btm_vals, top_vals, mask_mode="own"
-                )
-            else:
-                # Resize TOP to BTM's grid; TOP keeps its own resized blank.
-                top_vals = resize_to_reference(
-                    top_vals, btm_vals, mask_mode="own"
-                )
+            # Resize the non-reference side's values onto the reference grid
+            # and give BOTH sides the same blank: the union of each side's
+            # center-fit (cropped, not scaled) blank -- matched to the larger.
+            top_vals, btm_vals = resize_pair(top_vals, btm_vals, effective_ref)
 
             # Defensive post-resize guard: both grids must match exactly.
             if top_vals.shape != btm_vals.shape:

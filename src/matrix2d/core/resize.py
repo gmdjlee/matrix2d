@@ -7,9 +7,15 @@ Approach:
   a flat plane or linear ramp is preserved to machine precision.
 - Before interpolating, NaN (blank) cells are filled by nearest-valid values so
   interpolation near a blank edge does not bleed NaN into valid neighbours.
-- The blank mask is resized independently by block: a target cell is blank if
-  ANY source cell in its footprint is blank, so blanks never shrink; it is
-  then re-applied to the interpolated values.
+- The blank region is NOT scaled with the values. It is CROPPED: the source
+  blank keeps its absolute cell extent and is center-aligned onto the target
+  grid (cropped when the target is smaller, padded with valid cells when the
+  target is larger). This preserves the blank's real size and shape instead of
+  stretching it with the grid.
+- When bringing a TOP/BTM pair onto a common grid, both surfaces receive the
+  SAME blank: the UNION of each side's center-fit blank ("match to the larger
+  blank"). Per dimension the union spans at least the larger of the two blanks
+  while keeping each blank's actual shape.
 """
 
 from typing import Tuple
@@ -67,133 +73,155 @@ def _resize_filled(filled: np.ndarray, target_shape: Tuple[int, int]) -> np.ndar
     return out.astype(np.float64, copy=False)
 
 
-def _blank_bins(src_n, tgt_n):
-    """Per target-index inclusive source-index range ``[lo, hi]``.
+def _center_span(src_n: int, tgt_n: int) -> Tuple[int, int, int]:
+    """Overlap length and start offsets for center-aligning a 1D axis.
 
-    Each target cell pools every source cell whose center falls in its
-    footprint (always >= 1 cell). Downscale -> wide ranges so a blank grows to
-    its bigger extent; upscale -> a single nearest source cell (blank
-    replicated). Returns a list of (lo, hi) inclusive index pairs.
+    Returns ``(n, src_start, tgt_start)`` such that
+    ``dst[tgt_start:tgt_start+n] = src[src_start:src_start+n]`` centers the
+    source span within the target (cropping when ``src_n > tgt_n``, padding
+    when ``src_n < tgt_n``). Any odd leftover cell goes to the trailing edge.
     """
-    if tgt_n <= 1:
-        return [(0, src_n - 1)]
-    if src_n <= 1:
-        return [(0, 0)] * tgt_n
-    centers = np.linspace(0.0, src_n - 1, tgt_n)
-    mids = (centers[:-1] + centers[1:]) / 2.0
-    los = [0]
-    his = []
-    for m in mids:
-        cut = int(np.floor(m))
-        his.append(cut)
-        los.append(cut + 1)
-    his.append(src_n - 1)
-    ranges = []
-    for i in range(tgt_n):
-        lo, hi = los[i], his[i]
-        if hi < lo:  # upscale: empty bin -> nearest source cell
-            near = int(round(centers[i]))
-            lo = hi = near
-        ranges.append((max(0, lo), min(src_n - 1, hi)))
-    return ranges
+    n = min(src_n, tgt_n)
+    src_start = (src_n - n) // 2
+    tgt_start = (tgt_n - n) // 2
+    return n, src_start, tgt_start
 
 
-def _resize_mask(mask_valid: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-    """Resize a boolean valid-mask, preserving blanks at their bigger extent.
+def _center_fit_mask(
+    blank: np.ndarray, target_shape: Tuple[int, int]
+) -> np.ndarray:
+    """Center-align a boolean blank mask into ``target_shape`` by crop/pad.
 
-    A target cell is blank (invalid) if ANY source cell in its footprint is
-    blank ("bigger blank wins"): blanks never shrink away, and their shape is
-    kept by block/crop mapping rather than proportional point-sampling.
-    """
-    src_rows, src_cols = mask_valid.shape
-    tgt_rows, tgt_cols = target_shape
-    invalid = ~mask_valid
-    r_ranges = _blank_bins(src_rows, tgt_rows)
-    c_ranges = _blank_bins(src_cols, tgt_cols)
-    out_valid = np.ones((tgt_rows, tgt_cols), dtype=bool)
-    for i, (rlo, rhi) in enumerate(r_ranges):
-        row_block = invalid[rlo:rhi + 1, :]
-        if not row_block.any():
-            continue
-        for j, (clo, chi) in enumerate(c_ranges):
-            if row_block[:, clo:chi + 1].any():
-                out_valid[i, j] = False
-    return out_valid
-
-
-def resize_matrix(values: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
-    """Resize a warpage matrix to ``target_shape`` preserving warpage geometry.
-
-    NaN cells are treated as blank: they are filled by nearest-valid before
-    interpolation, and the blank mask is resized by block (any source blank
-    -> blank) and re-applied so blanks stay blank in the output.
+    No scaling: the blank keeps its absolute cell extent. Rows/cols beyond the
+    target are cropped (centered); missing rows/cols are padded as valid
+    (``False``, i.e. not blank), also centered.
 
     Args:
-        values: 2D float array; NaN marks blank cells.
-        target_shape: (rows, cols) of the output.
+        blank: 2D bool, True where the source cell is blank.
+        target_shape: (rows, cols) of the output mask.
 
     Returns:
-        A resized 2D float64 array with NaN in the resized blank region.
-
-    Raises:
-        ValueError: If input is not 2D, target_shape is invalid, or all-blank.
+        A 2D bool array of ``target_shape``, True where blank.
     """
-    arr = np.asarray(values, dtype=np.float64)
+    src_rows, src_cols = blank.shape
+    tgt_rows, tgt_cols = target_shape
+    out = np.zeros((tgt_rows, tgt_cols), dtype=bool)
+    n_r, sr0, tr0 = _center_span(src_rows, tgt_rows)
+    n_c, sc0, tc0 = _center_span(src_cols, tgt_cols)
+    out[tr0:tr0 + n_r, tc0:tc0 + n_c] = blank[sr0:sr0 + n_r, sc0:sc0 + n_c]
+    return out
+
+
+def _validate_resizable(arr: np.ndarray, target_shape: Tuple[int, int]) -> None:
+    """Shared input checks for value resizing. Raises ValueError on failure."""
     if arr.ndim != 2:
         raise ValueError("values must be 2D, got shape {0}".format(arr.shape))
     tgt_rows, tgt_cols = target_shape
     if tgt_rows < 1 or tgt_cols < 1:
         raise ValueError("target_shape must be positive, got {0}".format(target_shape))
 
+
+def resize_values(values: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+    """Bilinearly resize warpage VALUES to ``target_shape`` (no blank applied).
+
+    NaN cells are nearest-filled before interpolation so blank edges do not
+    bleed NaN, and the result is fully finite. The caller is responsible for
+    applying a blank mask (see ``resize_crop_blank`` / ``resize_pair``).
+
+    Args:
+        values: 2D float array; NaN marks blank cells.
+        target_shape: (rows, cols) of the output.
+
+    Returns:
+        A finite 2D float64 array of ``target_shape``.
+
+    Raises:
+        ValueError: If input is not 2D, target_shape is invalid, or all-blank.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    _validate_resizable(arr, target_shape)
     mask_valid = ~np.isnan(arr)
     if not mask_valid.any():
         raise ValueError("Cannot resize an all-blank (all-NaN) matrix.")
-
     filled = _nearest_fill(arr, mask_valid)
-    resized_vals = _resize_filled(filled, (tgt_rows, tgt_cols))
-    resized_mask = _resize_mask(mask_valid, (tgt_rows, tgt_cols))
+    return _resize_filled(filled, target_shape)
 
-    out = resized_vals
-    out[~resized_mask] = np.nan
+
+def resize_crop_blank(
+    values: np.ndarray, target_shape: Tuple[int, int]
+) -> np.ndarray:
+    """Resize VALUES to ``target_shape``; blank is CROPPED, not scaled.
+
+    Values are bilinearly resized (warpage geometry preserved). The source's
+    own blank keeps its absolute cell extent and is center-fit (crop/pad) onto
+    the target grid, then re-applied.
+
+    Args:
+        values: 2D float array; NaN marks blank cells.
+        target_shape: (rows, cols) of the output.
+
+    Returns:
+        A resized 2D float64 array with NaN in the center-fit blank region.
+
+    Raises:
+        ValueError: If input is not 2D, target_shape is invalid, or all-blank.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    out = resize_values(arr, target_shape)
+    blank_fit = _center_fit_mask(np.isnan(arr), target_shape)
+    out[blank_fit] = np.nan
     return out
 
 
-def resize_to_reference(
-    data: np.ndarray, reference: np.ndarray, mask_mode: str = "reference"
-) -> np.ndarray:
-    """Resize ``data`` to ``reference.shape`` and reconcile blank masks.
+def resize_pair(
+    top: np.ndarray, btm: np.ndarray, reference: str
+) -> "Tuple[np.ndarray, np.ndarray]":
+    """Bring a TOP/BTM pair onto a common grid, matching to the larger blank.
+
+    The reference side's grid is authoritative; the other side's VALUES are
+    bilinearly resized onto it. Both sides then receive the SAME blank: the
+    UNION of each side's center-fit (cropped, not scaled) blank. This matches
+    both surfaces to the larger blank while keeping each blank's actual shape.
 
     Args:
-        data: 2D array to resize (NaN = blank).
-        reference: 2D array whose shape (and, in "reference" mode, blank mask)
-            is authoritative.
-        mask_mode:
-            "reference" -> final blank mask = reference_mask | resized_data_mask
-                           (cells blank in either become blank).
-            "own"       -> keep only the resized data mask.
+        top: 2D float array (NaN = blank).
+        btm: 2D float array (NaN = blank).
+        reference: "TOP" or "BTM" -- whose grid is authoritative.
 
     Returns:
-        The resized data with the reconciled blank mask applied.
+        ``(top_out, btm_out)``, both on the reference grid, sharing one blank.
 
     Raises:
-        ValueError: On invalid dimensions or unknown mask_mode.
+        ValueError: On bad ``reference``, non-2D input, or an all-blank side
+            that must be resized.
     """
-    ref = np.asarray(reference, dtype=np.float64)
-    if ref.ndim != 2:
-        raise ValueError("reference must be 2D, got shape {0}".format(ref.shape))
-    if mask_mode not in ("reference", "own"):
+    if reference not in ("TOP", "BTM"):
         raise ValueError(
-            "mask_mode must be 'reference' or 'own', got {0!r}".format(mask_mode)
+            "reference must be 'TOP' or 'BTM', got {0!r}".format(reference)
+        )
+    top_arr = np.asarray(top, dtype=np.float64)
+    btm_arr = np.asarray(btm, dtype=np.float64)
+    if top_arr.ndim != 2 or btm_arr.ndim != 2:
+        raise ValueError(
+            "top/btm must be 2D, got {0} and {1}".format(
+                top_arr.shape, btm_arr.shape
+            )
         )
 
-    resized = resize_matrix(data, ref.shape)
+    if reference == "TOP":
+        common = top_arr.shape
+        top_vals = top_arr.copy()
+        btm_vals = resize_values(btm_arr, common)
+        top_blank = np.isnan(top_arr)
+        btm_blank = _center_fit_mask(np.isnan(btm_arr), common)
+    else:
+        common = btm_arr.shape
+        btm_vals = btm_arr.copy()
+        top_vals = resize_values(top_arr, common)
+        btm_blank = np.isnan(btm_arr)
+        top_blank = _center_fit_mask(np.isnan(top_arr), common)
 
-    if mask_mode == "own":
-        return resized
-
-    # "reference": blank where reference is blank OR resized data is blank.
-    ref_blank = np.isnan(ref)
-    resized_blank = np.isnan(resized)
-    final_blank = ref_blank | resized_blank
-    resized[final_blank] = np.nan
-    return resized
+    union_blank = top_blank | btm_blank
+    top_vals[union_blank] = np.nan
+    btm_vals[union_blank] = np.nan
+    return top_vals, btm_vals
