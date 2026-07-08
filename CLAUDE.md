@@ -88,6 +88,12 @@ charts.py stays Dash-free so it ports directly to the React migration.
   tab-delimited, NaN written as `nan`. Duplicate names get `_2`, `_3`.
   Prefix = Gap tab "Output name prefix" input; `naming.sanitize_prefix`
   strips filename-illegal chars, blank → `GAP`.
+- **Summary**: `run_pipeline` also writes `{prefix}.txt` into OUT — a pivot
+  (`core/summary.build_summary`) with temperature-point columns
+  (`{H|C}{temp}`, e.g. `H25`; heating-before-cooling then temp-ascending),
+  TOP-BTM combo rows (`TOP{n}-BTM{m}`), each cell the MAX gap for that combo
+  at that point (blank if none / all-NaN). Tab-delimited; a write failure
+  never aborts the batch.
 - **Pairing**: every TOP-sample × BTM-sample combination; per TOP
   temperature, H pairs with H and C with C. TOP/BTM temps within ±2°C
   (`pipeline.TEMP_TOLERANCE_C`) count as the same temperature point —
