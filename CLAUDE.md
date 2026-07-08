@@ -122,12 +122,18 @@ charts.py stays Dash-free so it ports directly to the React migration.
   a module-level dict (single-user local app).
 - Chart styling flows through `ChartOptions` dataclass only — never set
   fonts/ticks ad hoc in callbacks.
-- Chart Options are PER-TAB: the sidebar holds four independent control sets
-  (`opt2d`/`opt3d`/`optgap`/`opteff` id prefixes, built by
-  `layout._chart_options_panel(prefix, heading)`); only the active tab's
-  panel shows (`callbacks.toggle_chart_options` keyed on `tabs`). Each render
-  callback reads its own prefix via `_option_inputs(prefix)` /
-  `_option_states(prefix)`; suffix order matches `_build_options`. The Gap
+- Chart Options are PER-TAB and PER-CHART-TYPE: the sidebar holds four
+  independent control sets (`opt2d`/`opt3d`/`optgap`/`opteff` id prefixes,
+  built by `layout._chart_options_panel(prefix, heading)`); only the active
+  tab's panel shows (`callbacks.toggle_chart_options` keyed on `tabs`). Each
+  tab renders ONLY the fields its chart type uses, selected by
+  `layout.TAB_OPTION_FIELDS` (laid out via `_OPTION_ROWS`): 2D/Gap show the
+  full color+contour set; 3D (surface) drops `contour-levels`; Effective Gap
+  (line) drops colorscale/toggles/contour-levels/x-dtick and relabels
+  zmin/zmax as the y-axis range. Each render callback derives its Input/State
+  list from `layout.tab_option_suffixes(prefix)` (`_option_inputs` /
+  `_option_states`); `_build_options(prefix, values)` zips those suffixes to
+  values, so missing fields fall back to `ChartOptions` defaults. The Gap
   Compute batch export and inspect both use `optgap`.
 - Tabs: 2D View / 3D View / Gap Compute / Effective Gap. The Effective Gap
   tab (`effgap-graph`) plots `summary.effective_gap_series` from `store-gaps`

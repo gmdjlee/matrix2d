@@ -133,75 +133,158 @@ def _data_options_panel() -> html.Div:
     )
 
 
-# Chart Options are per-tab: 2D View, 3D View and Gap Compute each own an
-# independent set of controls. Each set shares this field layout but uses its
-# own id prefix ("opt2d"/"opt3d"/"optgap") so the three tabs never clobber one
-# another's styling.
+# Chart Options are per-tab and per-chart-type: 2D View, 3D View, Gap Compute
+# and Effective Gap each own an independent control set (own id prefix
+# "opt2d"/"opt3d"/"optgap"/"opteff"). The controls shown are tailored to that
+# tab's chart type — a 3D surface has no contour levels, a line chart has no
+# colorscale/contour/aspect — so users only see options that actually affect
+# the figure.
+#
+# Every control's id is "{prefix}-{suffix}"; ``_OPTION_ROWS`` lays them out
+# (paired suffixes share a sidebar row) and ``TAB_OPTION_FIELDS`` selects the
+# subset each tab renders. Callbacks derive the matching Input/State lists from
+# ``tab_option_suffixes`` so panel and callback never drift.
+_OPTION_ROWS = [
+    ("title",),
+    ("font-family",),
+    ("font-size", "title-size"),
+    ("tick-size",),
+    ("x-dtick", "y-dtick"),
+    ("colorscale",),
+    ("toggles",),
+    ("zmin", "zmax"),
+    ("contour-levels",),
+    ("width", "height"),
+]
+
+# Flat suffix order (used to align callback values with control ids).
+_OPTION_ORDER = [k for row in _OPTION_ROWS for k in row]
+
+# Common to every chart type: title, fonts, output size.
+_COMMON_FIELDS = {"title", "font-family", "font-size", "title-size",
+                  "tick-size", "width", "height"}
+# Color-mapped 2D charts (contour + heatmap): full color + contour controls.
+_2D_FIELDS = _COMMON_FIELDS | {"x-dtick", "y-dtick", "colorscale", "toggles",
+                               "zmin", "zmax", "contour-levels"}
+# 3D surface: same as 2D minus contour levels (surfaces are not contoured).
+_3D_FIELDS = _2D_FIELDS - {"contour-levels"}
+# Line chart (Effective Gap): no colorscale/contour/aspect; zmin/zmax act as
+# the y-axis range, y-dtick as its tick step.
+_LINE_FIELDS = _COMMON_FIELDS | {"y-dtick", "zmin", "zmax"}
+
+TAB_OPTION_FIELDS = {
+    "opt2d": _2D_FIELDS,
+    "opt3d": _3D_FIELDS,
+    "optgap": _2D_FIELDS,   # Gap tab shows 2D (contour/heatmap) + 3D surface
+    "opteff": _LINE_FIELDS,
+}
+
+# Default control label per suffix; ``toggles`` is a checklist (no label).
+_OPTION_LABELS = {
+    "title": "Title",
+    "font-family": "Font family",
+    "font-size": "Font size",
+    "title-size": "Title size",
+    "tick-size": "Tick font size",
+    "x-dtick": "X dtick",
+    "y-dtick": "Y dtick",
+    "colorscale": "Colorscale",
+    "toggles": None,
+    "zmin": "zmin",
+    "zmax": "zmax",
+    "contour-levels": "Contour levels",
+    "width": "Width",
+    "height": "Height",
+}
+
+# Per-tab label overrides: on the line chart zmin/zmax bound the y-axis.
+_TAB_OPTION_LABELS = {
+    "opteff": {"zmin": "Y-axis min", "zmax": "Y-axis max"},
+}
+
+# (default value, step) for the numeric controls; placeholder is "auto" when
+# the default is None (leaves the figure builder to pick the value).
+_OPTION_NUM = {
+    "font-size": (12, 1),
+    "title-size": (16, 1),
+    "tick-size": (10, 1),
+    "x-dtick": (None, 1),
+    "y-dtick": (None, 1),
+    "zmin": (None, None),
+    "zmax": (None, None),
+    "contour-levels": (None, 1),
+    "width": (None, 10),
+    "height": (500, 10),
+}
+
+
+def tab_option_suffixes(prefix: str):
+    """Ordered suffix list for one tab's chart-option controls.
+
+    Callbacks map their positional option values onto these suffixes, so the
+    order here is the contract between the panel and ``_build_options``.
+    """
+    allowed = TAB_OPTION_FIELDS[prefix]
+    return [k for k in _OPTION_ORDER if k in allowed]
+
+
+def _option_control(cid, key: str):
+    """Build the input control for one option ``key`` (id ``cid(key)``)."""
+    c = cid(key)
+    if key == "title":
+        return dcc.Input(id=c, type="text", value="", className="input-full")
+    if key == "font-family":
+        return dcc.Dropdown(id=c, options=[{"label": f, "value": f}
+                                           for f in FONT_FAMILIES],
+                            value="Arial", clearable=False)
+    if key == "colorscale":
+        return dcc.Dropdown(id=c, options=[{"label": s, "value": s}
+                                           for s in COLORSCALES],
+                            value="Jet", clearable=False)
+    if key == "toggles":
+        return dcc.Checklist(
+            id=c,
+            options=[
+                {"label": " Reverse colorscale", "value": "reverse"},
+                {"label": " Show colorbar", "value": "colorbar"},
+                {"label": " Show shape", "value": "shape"},
+                {"label": " Match data aspect", "value": "aspect"},
+            ],
+            value=["colorbar", "shape", "aspect"], className="checklist")
+    val, step = _OPTION_NUM[key]
+    placeholder = "auto" if val is None else ""
+    return _num(c, val, step=step, placeholder=placeholder)
+
+
+def _option_field(cid, key: str, label_override: dict, half: bool) -> html.Div:
+    """One control wrapped in a ``.field`` (or ``.field half``) div."""
+    label = label_override.get(key, _OPTION_LABELS[key])
+    children = []
+    if label is not None:
+        children.append(html.Label(label))
+    children.append(_option_control(cid, key))
+    return html.Div(className="field half" if half else "field",
+                    children=children)
+
+
 def _chart_options_panel(prefix: str, heading: str) -> html.Div:
-    """Chart Options controls with ``{prefix}-*`` ids (one per tab)."""
+    """Chart Options panel for one tab, showing only its chart type's fields."""
     def cid(name: str) -> str:
         return prefix + "-" + name
 
-    return html.Div(
-        className="panel",
-        children=[
-            html.H3(heading),
-            html.Div(className="field", children=[
-                html.Label("Title"),
-                dcc.Input(id=cid("title"), type="text", value="", className="input-full"),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("Font family"),
-                dcc.Dropdown(id=cid("font-family"),
-                             options=[{"label": f, "value": f} for f in FONT_FAMILIES],
-                             value="Arial", clearable=False),
-            ]),
-            html.Div(className="row", children=[
-                html.Div(className="field half", children=[
-                    html.Label("Font size"), _num(cid("font-size"), 12, step=1)]),
-                html.Div(className="field half", children=[
-                    html.Label("Title size"), _num(cid("title-size"), 16, step=1)]),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("Tick font size"), _num(cid("tick-size"), 10, step=1)]),
-            html.Div(className="row", children=[
-                html.Div(className="field half", children=[
-                    html.Label("X dtick"), _num(cid("x-dtick"), None, step=1, placeholder="auto")]),
-                html.Div(className="field half", children=[
-                    html.Label("Y dtick"), _num(cid("y-dtick"), None, step=1, placeholder="auto")]),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("Colorscale"),
-                dcc.Dropdown(id=cid("colorscale"),
-                             options=[{"label": c, "value": c} for c in COLORSCALES],
-                             value="Jet", clearable=False),
-            ]),
-            html.Div(className="field", children=[
-                dcc.Checklist(id=cid("toggles"),
-                              options=[
-                                  {"label": " Reverse colorscale", "value": "reverse"},
-                                  {"label": " Show colorbar", "value": "colorbar"},
-                                  {"label": " Show shape", "value": "shape"},
-                                  {"label": " Match data aspect", "value": "aspect"},
-                              ],
-                              value=["colorbar", "shape", "aspect"], className="checklist"),
-            ]),
-            html.Div(className="row", children=[
-                html.Div(className="field half", children=[
-                    html.Label("zmin"), _num(cid("zmin"), None, placeholder="auto")]),
-                html.Div(className="field half", children=[
-                    html.Label("zmax"), _num(cid("zmax"), None, placeholder="auto")]),
-            ]),
-            html.Div(className="field", children=[
-                html.Label("Contour levels"), _num(cid("contour-levels"), None, step=1, placeholder="auto")]),
-            html.Div(className="row", children=[
-                html.Div(className="field half", children=[
-                    html.Label("Width"), _num(cid("width"), None, step=10, placeholder="auto")]),
-                html.Div(className="field half", children=[
-                    html.Label("Height"), _num(cid("height"), 500, step=10)]),
-            ]),
-        ],
-    )
+    allowed = TAB_OPTION_FIELDS[prefix]
+    label_override = _TAB_OPTION_LABELS.get(prefix, {})
+    children = [html.H3(heading)]
+    for row in _OPTION_ROWS:
+        keys = [k for k in row if k in allowed]
+        if not keys:
+            continue
+        if len(keys) == 1:
+            children.append(_option_field(cid, keys[0], label_override, half=False))
+        else:
+            children.append(html.Div(className="row", children=[
+                _option_field(cid, k, label_override, half=True) for k in keys]))
+    return html.Div(className="panel", children=children)
 
 
 def _chart_options_stack() -> html.Div:

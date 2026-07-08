@@ -24,7 +24,7 @@ import numpy as np
 from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.core.summary import effective_gap_series
-from matrix2d.ui import charts, helpers, table_paging
+from matrix2d.ui import charts, helpers, layout, table_paging
 from matrix2d.ui.dialogs import pick_folder
 
 logger = logging.getLogger(__name__)
@@ -103,10 +103,14 @@ def _get_gap_rows():
 # configured per tab rather than shared.
 # ---------------------------------------------------------------------------
 
-def _build_options(title, font_family, font_size, title_size, tick_size,
-                   x_dtick, y_dtick, colorscale, toggles, zmin, zmax,
-                   contour_levels, width, height) -> charts.ChartOptions:
-    toggles = toggles or []
+def _build_options(prefix, values) -> charts.ChartOptions:
+    """Assemble ChartOptions from one tab's control ``values``.
+
+    ``values`` are positional in ``layout.tab_option_suffixes(prefix)`` order.
+    Fields a tab does not render (e.g. contour levels on 3D, colorscale on the
+    line chart) are simply absent and fall back to ChartOptions defaults.
+    """
+    d = dict(zip(layout.tab_option_suffixes(prefix), values))
 
     def _int(v):
         return int(v) if v is not None and v != "" else None
@@ -114,50 +118,47 @@ def _build_options(title, font_family, font_size, title_size, tick_size,
     def _float(v):
         return float(v) if v is not None and v != "" else None
 
+    toggles = d.get("toggles") or []
+    font_size = d.get("font-size")
+    title_size = d.get("title-size")
+    tick_size = d.get("tick-size")
+
     return charts.ChartOptions(
-        title=title or "",
-        font_family=font_family or "Arial",
+        title=d.get("title") or "",
+        font_family=d.get("font-family") or "Arial",
         font_size=int(font_size) if font_size else 12,
         title_font_size=int(title_size) if title_size else 16,
         tick_font_size=int(tick_size) if tick_size else 10,
-        x_tick_step=_float(x_dtick),
-        y_tick_step=_float(y_dtick),
-        colorscale=colorscale or "Jet",
+        x_tick_step=_float(d.get("x-dtick")),
+        y_tick_step=_float(d.get("y-dtick")),
+        colorscale=d.get("colorscale") or "Jet",
         reverse_colorscale="reverse" in toggles,
         show_colorbar="colorbar" in toggles,
         show_shape="shape" in toggles,
         match_aspect="aspect" in toggles,
-        zmin=_float(zmin),
-        zmax=_float(zmax),
-        contour_levels=_int(contour_levels),
-        width=_int(width),
-        height=_int(height),
+        zmin=_float(d.get("zmin")),
+        zmax=_float(d.get("zmax")),
+        contour_levels=_int(d.get("contour-levels")),
+        width=_int(d.get("width")),
+        height=_int(d.get("height")),
     )
 
 
-# Chart-option control ids share this suffix order for every tab; the tab's
-# prefix ("opt2d"/"opt3d"/"optgap") is prepended. Order here MUST match the
-# positional signature of _build_options.
-_OPTION_SUFFIXES = [
-    "title", "font-family", "font-size", "title-size", "tick-size",
-    "x-dtick", "y-dtick", "colorscale", "toggles", "zmin", "zmax",
-    "contour-levels", "width", "height",
-]
-
-# number of option controls per tab (used to slice *rest in render callbacks)
-_N_OPTIONS = len(_OPTION_SUFFIXES)
-
-
 def _option_states(prefix):
-    """State() list for one tab's chart-option controls, in _build_options order."""
+    """State() list for one tab's chart-option controls, in build order."""
     return [State("{0}-{1}".format(prefix, sfx), "value")
-            for sfx in _OPTION_SUFFIXES]
+            for sfx in layout.tab_option_suffixes(prefix)]
 
 
 def _option_inputs(prefix):
     """Input() list (live re-render) for one tab's chart-option controls."""
     return [Input("{0}-{1}".format(prefix, sfx), "value")
-            for sfx in _OPTION_SUFFIXES]
+            for sfx in layout.tab_option_suffixes(prefix)]
+
+
+# option-control counts per tab (used to slice *rest in render callbacks)
+_N2D = len(layout.tab_option_suffixes("opt2d"))
+_N3D = len(layout.tab_option_suffixes("opt3d"))
 
 # Data-transform controls (Data Options panel). Order matters: the first four
 # feed the TOP config (flip / rotate / zero cell), the last two the BTM config
@@ -608,14 +609,14 @@ def register_callbacks(app):
     )
     def render_2d(top_sample, btm_sample, phase_temp, chart_type,
                   show_resized, reference, *rest):
-        option_values = rest[:_N_OPTIONS]
-        transform_values = rest[_N_OPTIONS:-1]
+        option_values = rest[:_N2D]
+        transform_values = rest[_N2D:-1]
         store_metas = rest[-1]
         if top_sample is None and btm_sample is None:
             return (_empty_fig("Select a TOP sample"),
                     _empty_fig("Select a BTM sample"), "")
         try:
-            opts = _build_options(*option_values)
+            opts = _build_options("opt2d", option_values)
             top_cfg, btm_cfg = _transform_configs(transform_values)
 
             def _side_values(kind, sample_no):
@@ -837,8 +838,8 @@ def register_callbacks(app):
     )
     def render_3d(top_keys, btm_keys, gap_keys, out_keys, show_resized, reference,
                   _store_gaps, offset_values, offset_ids, *rest):
-        option_values = rest[:_N_OPTIONS]
-        transform_values = rest[_N_OPTIONS:-1]
+        option_values = rest[:_N3D]
+        transform_values = rest[_N3D:-1]
         store_metas = rest[-1]
         selections = [("TOP", top_keys or []), ("BTM", btm_keys or []),
                       ("GAP", gap_keys or []), ("OUT", out_keys or [])]
@@ -850,7 +851,7 @@ def register_callbacks(app):
             for oid, oval in zip(offset_ids or [], offset_values or []):
                 offset_map[oid["key"]] = float(oval) if oval is not None else 0.0
 
-            opts = _build_options(*option_values)
+            opts = _build_options("opt3d", option_values)
             top_cfg, btm_cfg = _transform_configs(transform_values)
 
             records = []
@@ -1120,7 +1121,7 @@ def register_callbacks(app):
             values = _resolve_values(gap_key, {})
             if values is None:
                 return _empty_fig(), _empty_fig(), "Gap result not in cache."
-            opts = _build_options(*option_values)
+            opts = _build_options("optgap", option_values)
             name = gap_key[len("gap::"):]
             if not opts.title:
                 opts.title = "GAP " + name
@@ -1161,7 +1162,7 @@ def register_callbacks(app):
             if not series:
                 return _empty_fig("No valid temperature points"), ""
 
-            opts = _build_options(*option_values)
+            opts = _build_options("opteff", option_values)
             if not opts.title:
                 opts.title = "Effective Gap"
             fig = charts.effective_gap_chart(series, opts)
@@ -1298,7 +1299,7 @@ def register_callbacks(app):
                     {"width": "0%"}, "")
         if not out_dir:
             return True, False, "Set an OUT folder first.", {"width": "0%"}, ""
-        opts = _build_options(*option_values)
+        opts = _build_options("optgap", option_values)
         with _EXPORT_LOCK:
             if _EXPORT["running"]:
                 logger.info("Export-all request ignored: already running")
