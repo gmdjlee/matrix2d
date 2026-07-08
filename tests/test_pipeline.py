@@ -195,6 +195,18 @@ def test_run_pipeline_end_to_end(tmp_path):
         assert np.nanmin(r.result.gap) == pytest.approx(0.0, abs=1e-9)
 
 
+def test_run_pipeline_populates_max_gap(tmp_path):
+    # max_gap must be carried on each result so the UI never re-reads the
+    # saved gap files per poll tick to obtain it.
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir), reference="TOP")
+    assert len(results) > 0
+    for r in results:
+        assert r.max_gap is not None
+        # matches the in-memory gap array's finite maximum
+        assert r.max_gap == pytest.approx(float(np.nanmax(r.result.gap)))
+
+
 def test_run_pipeline_creates_out_dir(tmp_path):
     top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
     assert not out_dir.exists()

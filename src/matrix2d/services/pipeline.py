@@ -80,11 +80,17 @@ class GapJob:
 
 @dataclass
 class GapJobResult:
-    """The outcome of running a GapJob."""
+    """The outcome of running a GapJob.
+
+    ``max_gap`` is the maximum finite gap value (None when the gap is all-NaN),
+    captured while the array is still in memory so consumers never re-read the
+    saved file to obtain it.
+    """
 
     job: GapJob
     result: GapResult
     out_path: str
+    max_gap: Optional[float] = None
 
 
 def _group_by_sample(metas: "List[SampleMeta]") -> "Dict[int, List[SampleMeta]]":
@@ -312,12 +318,15 @@ def run_pipeline(
             out_path = os.path.join(out_dir, job.out_name)
             save_matrix(out_path, gap_res.gap)
 
-            # Capture the max gap for the summary before the array may be
-            # dropped (retain_gap=False). All-NaN gap -> NaN (blank cell).
+            # Capture the max gap for the summary AND the result before the
+            # array may be dropped (retain_gap=False). All-NaN gap -> None so
+            # the summary leaves a blank cell and the Effective Gap chart skips
+            # the point (build_summary/effective_gap_series treat None/NaN as
+            # missing).
             if np.isfinite(gap_res.gap).any():
                 max_gap = float(np.nanmax(gap_res.gap))
             else:
-                max_gap = float("nan")
+                max_gap = None
             summary_records.append(
                 (job.top.sample_no, job.btm.sample_no, job.phase,
                  job.top.temp_c, max_gap)
@@ -332,7 +341,8 @@ def run_pipeline(
                     contact_index=gap_res.contact_index,
                 )
             results.append(
-                GapJobResult(job=job, result=kept, out_path=out_path)
+                GapJobResult(job=job, result=kept, out_path=out_path,
+                             max_gap=max_gap)
             )
         except (ValueError, OSError) as exc:
             logger.error(

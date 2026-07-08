@@ -1019,14 +1019,11 @@ def register_callbacks(app):
             # parsed once here so downstream callbacks (3D dataset options)
             # don't re-run the gap-name regex on every render.
             parsed = helpers.parse_gap_name(job.out_name)
-            # Max gap per result feeds the Effective Gap chart's AVG/STD. The
-            # gap array was dropped from the result (retain_gap=False) but is
-            # in the cache the worker just registered.
-            gap_vals = helpers.get_gap(job.out_name)
-            if gap_vals is not None and np.isfinite(gap_vals).any():
-                max_gap = float(np.nanmax(gap_vals))
-            else:
-                max_gap = None
+            # Max gap per result feeds the Effective Gap chart's AVG/STD. It was
+            # captured by the pipeline while the array was in memory, so this
+            # poll never re-reads the saved files (doing so per tick over a
+            # large batch blew past the 400ms interval and the publish response
+            # was discarded forever -> progress hung).
             summaries.append({
                 "out_name": job.out_name,
                 "top": os.path.basename(getattr(job.top, "path", "")),
@@ -1037,7 +1034,7 @@ def register_callbacks(app):
                 "top_no": parsed["top_no"] if parsed else None,
                 "btm_no": parsed["btm_no"] if parsed else None,
                 "temp_c": parsed["temp_c"] if parsed else None,
-                "max_gap": max_gap,
+                "max_gap": r.max_gap,
             })
 
         table_data = [{
