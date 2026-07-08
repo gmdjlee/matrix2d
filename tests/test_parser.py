@@ -220,6 +220,34 @@ def test_blank_threshold_value():
     assert BLANK_THRESHOLD == 2000.0
 
 
+# ---- load_matrix size guard ---------------------------------------------------
+
+def test_load_matrix_rejects_oversize_file(tmp_path, monkeypatch):
+    p = tmp_path / "m.txt"
+    p.write_text("1.0 2.0 3.0\n4.0 5.0 6.0\n")
+    monkeypatch.setattr("matrix2d.core.parser.os.path.getsize", lambda path: 10 ** 12)
+    with pytest.raises(ValueError, match="too large"):
+        load_matrix(str(p))
+
+
+def test_load_matrix_size_guard_disabled_with_zero(tmp_path, monkeypatch):
+    p = tmp_path / "m.txt"
+    p.write_text("1.0 2.0 3.0\n4.0 5.0 6.0\n")
+    monkeypatch.setenv("MATRIX2D_MAX_FILE_MB", "0")
+    monkeypatch.setattr("matrix2d.core.parser.os.path.getsize", lambda path: 10 ** 12)
+    arr = load_matrix(str(p))
+    assert arr.shape == (2, 3)
+    np.testing.assert_allclose(arr, [[1, 2, 3], [4, 5, 6]])
+
+
+def test_load_matrix_normal_file_unaffected(tmp_path):
+    p = tmp_path / "m.txt"
+    p.write_text("1.0 2.0 3.0\n4.0 5.0 6.0\n")
+    arr = load_matrix(str(p))
+    assert arr.shape == (2, 3)
+    np.testing.assert_allclose(arr, [[1, 2, 3], [4, 5, 6]])
+
+
 # ---- load_warpage ------------------------------------------------------------
 
 def test_load_warpage(tmp_path):

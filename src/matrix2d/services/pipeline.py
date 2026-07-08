@@ -2,6 +2,7 @@
 
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -19,7 +20,7 @@ from ..core.naming import (
 from ..core.resize import resize_pair
 from ..core.summary import build_summary
 from ..core.transform import TransformConfig, apply_transform
-from .repository import load_data, save_matrix, save_text, scan_folder
+from .repository import read_matrix, save_matrix, save_text, scan_folder
 
 logger = logging.getLogger(__name__)
 
@@ -28,41 +29,66 @@ logger = logging.getLogger(__name__)
 # many degrees Celsius are treated as the same temperature point when pairing.
 TEMP_TOLERANCE_C = 2
 
+_XFORM_CACHE_DEFAULT = 64
 
-def _make_matrix_loader(cfg, seed):
+
+def _xform_cache_max() -> int:
+    """Return the max per-loader transformed-matrix cache size.
+
+    Controlled by ``MATRIX2D_XFORM_CACHE`` (falls back to 64 on a missing or
+    invalid value; clamped to a minimum of 1), read fresh from env each call
+    so tests can adjust it per-run.
+    """
+    raw = os.environ.get("MATRIX2D_XFORM_CACHE")
+    if raw is None:
+        return _XFORM_CACHE_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        return _XFORM_CACHE_DEFAULT
+    return max(1, val)
+
+
+def _make_matrix_loader(cfg):
     """Build a memoized (load + transform) accessor for one side (TOP/BTM).
 
     Args:
         cfg: Optional TransformConfig applied to each loaded matrix.
-        seed: Dict[str, np.ndarray] of pre-loaded RAW matrices (from the
-            scan-folder validation pass), consumed lazily so each file's
-            raw bytes are read from disk at most once.
 
     Returns:
-        A ``load(meta) -> np.ndarray`` callable, memoized per path so each
-        unique file is loaded and transformed exactly once across all
-        pairings. Load/transform errors are cached and re-raised so a bad
-        file is not retried per job (preserves the per-job skip-and-continue
-        semantics of run_pipeline).
+        A ``load(meta) -> np.ndarray`` callable. Raw bytes are read through
+        :func:`repository.read_matrix` (a shared, bounded, stat-keyed cache),
+        so this loader never holds a full pre-loaded seed set in memory.
+        Successfully transformed arrays are kept in a small bounded LRU
+        (size from :func:`_xform_cache_max`) so re-loading a file only
+        requires cheap CPU (transform), not disk I/O -- while peak memory
+        stays bounded regardless of the number of TOP/BTM files. Failures
+        are kept in a separate, never-evicted dict so a bad file is not
+        retried (and re-logged) on every job that uses it -- preserving the
+        per-job skip-and-continue semantics of run_pipeline.
     """
-    transformed = {}  # type: Dict[str, Tuple[Optional[np.ndarray], Optional[Exception]]]
+    transformed = OrderedDict()  # type: OrderedDict[str, np.ndarray]
+    failures = {}  # type: Dict[str, Exception]
 
     def load(meta):
         path = meta.path
+        if path in failures:
+            raise failures[path]
         cached = transformed.get(path)
-        if cached is None:
-            try:
-                raw = seed.pop(path, None)
-                if raw is None:
-                    raw = load_data(meta).values
-                vals = apply_transform(raw, cfg)
-                cached = (vals, None)
-            except (ValueError, OSError) as exc:
-                cached = (None, exc)
-            transformed[path] = cached
-        vals, exc = cached
-        if exc is not None:
-            raise exc
+        if cached is not None:
+            transformed.move_to_end(path)
+            return cached
+        try:
+            raw = read_matrix(path)
+            vals = apply_transform(raw, cfg)
+        except (ValueError, OSError) as exc:
+            failures[path] = exc
+            raise
+        transformed[path] = vals
+        transformed.move_to_end(path)
+        max_size = _xform_cache_max()
+        while len(transformed) > max_size:
+            transformed.popitem(last=False)
         return vals
 
     return load
@@ -273,14 +299,12 @@ def run_pipeline(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    top_seed = {}  # type: Dict[str, np.ndarray]
-    btm_seed = {}  # type: Dict[str, np.ndarray]
-    tops = scan_folder(top_dir, "TOP", matrix_cache=top_seed)
-    btms = scan_folder(btm_dir, "BTM", matrix_cache=btm_seed)
+    tops = scan_folder(top_dir, "TOP")
+    btms = scan_folder(btm_dir, "BTM")
     jobs = plan_jobs(tops, btms, out_prefix=out_prefix)
 
-    top_load = _make_matrix_loader(top_transform, top_seed)
-    btm_load = _make_matrix_loader(btm_transform, btm_seed)
+    top_load = _make_matrix_loader(top_transform)
+    btm_load = _make_matrix_loader(btm_transform)
 
     if progress_cb is not None:
         progress_cb(0, len(jobs))

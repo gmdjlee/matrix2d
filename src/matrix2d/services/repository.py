@@ -3,16 +3,82 @@
 import glob
 import logging
 import os
-from typing import Dict, List, Optional
+from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..core.models import SampleMeta, WarpageData
-from ..core.parser import load_matrix, load_warpage, parse_data_filename
+from ..core.parser import load_matrix, parse_data_filename
 
 logger = logging.getLogger(__name__)
 
 _SCAN_EXTS = ("*.dat", "*.csv", "*.txt")
+
+# Shared, bounded, stat-keyed raw-matrix cache: path -> ((mtime_ns, size), ndarray).
+# Populated/consumed by read_matrix(); shared across scan_folder and load_data so
+# a compute run right after a scan reuses the already-parsed arrays.
+_RAW_CACHE = (
+    OrderedDict()
+)  # type: OrderedDict[str, Tuple[Tuple[int, int], np.ndarray]]
+
+_RAW_CACHE_DEFAULT = 128
+
+
+def _raw_cache_max() -> int:
+    """Return the max raw-matrix cache size, read fresh from env each call.
+
+    Controlled by ``MATRIX2D_RAW_CACHE`` (falls back to 128 on a missing or
+    invalid value; clamped to a minimum of 1).
+    """
+    raw = os.environ.get("MATRIX2D_RAW_CACHE")
+    if raw is None:
+        return _RAW_CACHE_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        return _RAW_CACHE_DEFAULT
+    return max(1, val)
+
+
+def read_matrix(path: str) -> np.ndarray:
+    """Load a matrix via a shared, bounded, stat-keyed cache.
+
+    Cache key is ``(mtime_ns, size)`` from ``os.stat`` — a cache hit is
+    returned only if the file's stat is unchanged since it was cached.
+    On miss (or stale entry), delegates to :func:`parser.load_matrix` and
+    stores the result, evicting least-recently-used entries beyond the
+    bound reported by :func:`_raw_cache_max`.
+
+    Returned array is shared and cached — callers must treat it as
+    read-only (do not mutate in place).
+
+    Args:
+        path: Path to the matrix text file.
+
+    Returns:
+        A 2D float64 ndarray (possibly shared with a previous caller).
+
+    Raises:
+        ValueError: If the file has no numeric content or a cell is
+            unparseable (propagated from ``load_matrix``; not cached).
+        OSError: If the file cannot be stat'd or read (not cached).
+    """
+    st = os.stat(path)
+    stat_key = (st.st_mtime_ns, st.st_size)
+
+    cached = _RAW_CACHE.get(path)
+    if cached is not None and cached[0] == stat_key:
+        _RAW_CACHE.move_to_end(path)
+        return cached[1]
+
+    arr = load_matrix(path)
+    _RAW_CACHE[path] = (stat_key, arr)
+    _RAW_CACHE.move_to_end(path)
+    max_size = _raw_cache_max()
+    while len(_RAW_CACHE) > max_size:
+        _RAW_CACHE.popitem(last=False)
+    return arr
 
 
 def list_data_files(folder: str) -> "List[str]":
@@ -68,7 +134,7 @@ def scan_folder(
     for done, path in enumerate(paths, start=1):
         try:
             meta = parse_data_filename(path, kind, path=path)
-            mat = load_matrix(path)  # content validation; also cached below
+            mat = read_matrix(path)  # content validation; also cached below
             if matrix_cache is not None:
                 matrix_cache[path] = mat
             metas.append(meta)
@@ -83,13 +149,20 @@ def scan_folder(
 def load_data(meta: SampleMeta) -> WarpageData:
     """Load the WarpageData for a given SampleMeta from its path.
 
+    Routes the matrix read through :func:`read_matrix` so a compute run
+    right after a scan reuses the already-parsed array. The returned
+    WarpageData owns a fresh copy of the values (the cache's array is
+    shared/read-only), preserving the previous "fresh array" contract.
+
     Args:
         meta: SampleMeta whose ``path`` points to the matrix file.
 
     Returns:
         The loaded WarpageData.
     """
-    return load_warpage(meta.path, meta.kind)
+    parsed_meta = parse_data_filename(meta.path, meta.kind, path=meta.path)
+    values = read_matrix(meta.path)
+    return WarpageData(meta=parsed_meta, values=values.copy())
 
 
 def save_matrix(

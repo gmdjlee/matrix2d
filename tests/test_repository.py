@@ -1,10 +1,14 @@
+import os
+
 import numpy as np
 import pytest
 
 from matrix2d.core.parser import load_matrix
+from matrix2d.services import repository
 from matrix2d.services.repository import (
     list_data_files,
     load_data,
+    read_matrix,
     save_matrix,
     scan_folder,
 )
@@ -45,6 +49,30 @@ def test_scan_folder_skips_bad_content(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         metas = scan_folder(str(tmp_path), "TOP")
     assert [m.sample_no for m in metas] == [1]
+
+
+def test_scan_folder_skips_oversize_file(tmp_path, caplog, monkeypatch):
+    import logging
+
+    good = tmp_path / "good_PT0001_00011s(25C).dat"
+    huge = tmp_path / "huge_PT0002_00011s(25C).dat"
+    good.write_text("1,2\n3,4\n")
+    huge.write_text("1,2\n3,4\n")
+
+    real_getsize = os.path.getsize
+
+    def _fake_getsize(path):
+        if os.path.abspath(path) == os.path.abspath(str(huge)):
+            return 10 ** 12
+        return real_getsize(path)
+
+    monkeypatch.setattr("matrix2d.core.parser.os.path.getsize", _fake_getsize)
+
+    with caplog.at_level(logging.WARNING):
+        metas = scan_folder(str(tmp_path), "TOP")
+
+    assert [m.sample_no for m in metas] == [1]
+    assert any("too large" in rec.message for rec in caplog.records)
 
 
 def test_scan_gap_folder_gap_naming(tmp_path):
@@ -153,3 +181,49 @@ def test_save_matrix_creates_parent(tmp_path):
 def test_save_matrix_non_2d_raises(tmp_path):
     with pytest.raises(ValueError):
         save_matrix(str(tmp_path / "x.txt"), np.array([1.0, 2.0]))
+
+
+def test_read_matrix_caches_unchanged_file(tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_text("1,2\n3,4\n")
+    first = read_matrix(str(p))
+    second = read_matrix(str(p))
+    assert first is second
+    assert np.array_equal(first, np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+
+def test_read_matrix_invalidates_on_rewrite(tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_text("1,2\n3,4\n")
+    first = read_matrix(str(p))
+    # Different size so the (mtime_ns, size) cache key changes even on
+    # filesystems with coarse mtime resolution.
+    p.write_text("10,20,30\n40,50,60\n")
+    second = read_matrix(str(p))
+    assert second is not first
+    assert np.array_equal(second, np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]))
+
+
+def test_read_matrix_respects_bound(tmp_path):
+    p1 = tmp_path / "a.txt"
+    p2 = tmp_path / "b.txt"
+    p1.write_text("1,2\n3,4\n")
+    p2.write_text("5,6\n7,8\n")
+    os.environ["MATRIX2D_RAW_CACHE"] = "1"
+    try:
+        first = read_matrix(str(p1))
+        read_matrix(str(p2))  # evicts p1 (bound = 1)
+        refetched = read_matrix(str(p1))
+        assert refetched is not first
+    finally:
+        del os.environ["MATRIX2D_RAW_CACHE"]
+
+
+def test_load_data_returns_owned_copy(tmp_path):
+    p = tmp_path / "A_PT0009_00060s(240C).dat"
+    p.write_text("1.0,2.0\n3.0,4.0\n")
+    metas = scan_folder(str(tmp_path), "TOP")
+    wd = load_data(metas[0])
+    cached = repository._RAW_CACHE[str(p)][1]
+    assert wd.values is not cached
+    assert np.array_equal(wd.values, cached)

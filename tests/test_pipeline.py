@@ -376,6 +376,33 @@ def test_run_pipeline_writes_summary_file(tmp_path):
     assert by_label["STD"]["H240"] == ""
 
 
+def test_run_pipeline_bounded_xform_cache_still_correct(tmp_path):
+    # A tiny transform-cache cap forces constant eviction/thrash across the
+    # job loop (P1 bounded-memory change); results must be identical to an
+    # unbounded (default-cache) run.
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    out_bounded = tmp_path / "OUT_BOUNDED"
+
+    baseline = run_pipeline(str(top_dir), str(btm_dir), str(out_dir))
+
+    old_val = os.environ.get("MATRIX2D_XFORM_CACHE")
+    os.environ["MATRIX2D_XFORM_CACHE"] = "1"
+    try:
+        bounded = run_pipeline(str(top_dir), str(btm_dir), str(out_bounded))
+    finally:
+        if old_val is None:
+            os.environ.pop("MATRIX2D_XFORM_CACHE", None)
+        else:
+            os.environ["MATRIX2D_XFORM_CACHE"] = old_val
+
+    assert len(baseline) == len(bounded) > 0
+    for rb, rc in zip(baseline, bounded):
+        assert rb.job.out_name == rc.job.out_name
+        np.testing.assert_allclose(
+            rc.result.gap, rb.result.gap, equal_nan=True
+        )
+
+
 def test_run_pipeline_progress_callback(tmp_path):
     top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
     calls = []

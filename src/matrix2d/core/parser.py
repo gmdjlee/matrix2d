@@ -35,6 +35,11 @@ BLANK_THRESHOLD = 2000.0
 
 _VALID_EXTS = (".dat", ".csv", ".txt")
 
+# Default max input file size (MB) before load_matrix refuses it. Generous
+# on purpose — this guards against pathological files, not normal large
+# warpage matrices.
+MAX_FILE_MB_DEFAULT = 512
+
 
 def parse_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
     """Parse a measurement filename into a SampleMeta.
@@ -154,6 +159,26 @@ def _parse_cell(token: str) -> float:
     return val
 
 
+def _max_file_bytes() -> int:
+    """Max input file size in bytes before load_matrix refuses it.
+
+    Controlled by MATRIX2D_MAX_FILE_MB (megabytes; falls back to
+    MAX_FILE_MB_DEFAULT on a missing/invalid value; a value <= 0 disables
+    the guard by returning a very large limit).
+    """
+    raw = os.environ.get("MATRIX2D_MAX_FILE_MB")
+    if raw is None:
+        mb = MAX_FILE_MB_DEFAULT
+    else:
+        try:
+            mb = int(raw)
+        except ValueError:
+            mb = MAX_FILE_MB_DEFAULT
+    if mb <= 0:
+        return 2 ** 63 - 1
+    return mb * 1024 * 1024
+
+
 def load_matrix(path: str) -> np.ndarray:
     """Load a 2D numeric matrix from a text file.
 
@@ -168,8 +193,18 @@ def load_matrix(path: str) -> np.ndarray:
         A 2D float64 ndarray.
 
     Raises:
-        ValueError: If the file has no numeric content or a cell is unparseable.
+        ValueError: If the file has no numeric content, a cell is
+            unparseable, or the file exceeds the size guard (see
+            :func:`_max_file_bytes`).
     """
+    size = os.path.getsize(path)
+    limit = _max_file_bytes()
+    if size > limit:
+        raise ValueError(
+            "Matrix file too large: {0} is {1} bytes (limit {2} bytes; "
+            "raise MATRIX2D_MAX_FILE_MB to allow).".format(path, size, limit)
+        )
+
     with open(path, "r", encoding="utf-8") as fh:
         raw_lines = fh.readlines()
 
@@ -181,20 +216,32 @@ def load_matrix(path: str) -> np.ndarray:
 
     use_comma = any("," in ln for ln in content_lines)
 
-    rows: List[List[float]] = []
+    # Convert each line to a compact float64 row array as soon as it's parsed
+    # so only one row's worth of python floats is alive at a time (the
+    # python list of floats is discarded per-row instead of accumulating
+    # R*C python floats before the final np.asarray).
+    row_arrays: List[np.ndarray] = []
     for ln in content_lines:
         if use_comma:
             tokens = ln.split(",")
         else:
             tokens = ln.split()
-        rows.append([_parse_cell(tok) for tok in tokens])
+        row_list = [_parse_cell(tok) for tok in tokens]
+        row_arrays.append(np.asarray(row_list, dtype=np.float64))
 
-    max_len = max(len(r) for r in rows)
-    for r in rows:
-        if len(r) < max_len:
-            r.extend([np.nan] * (max_len - len(r)))
+    max_len = max(a.shape[0] for a in row_arrays)
+    if all(a.shape[0] == max_len for a in row_arrays):
+        return np.vstack(row_arrays)
 
-    return np.asarray(rows, dtype=np.float64)
+    padded = []
+    for a in row_arrays:
+        if a.shape[0] < max_len:
+            full = np.full(max_len, np.nan, dtype=np.float64)
+            full[: a.shape[0]] = a
+            padded.append(full)
+        else:
+            padded.append(a)
+    return np.vstack(padded)
 
 
 def load_warpage(path: str, kind: str) -> WarpageData:
