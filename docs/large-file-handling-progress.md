@@ -20,8 +20,8 @@ status table below.
 |------|-------|--------|--------|
 | P2 | Shared bounded, mtime-keyed raw-matrix cache (dedupe disk reads) | ✅ DONE | see git log |
 | P1 | Bound pipeline memory (drop unbounded seed + memo) | ✅ DONE | see git log |
-| P4 | Stream `load_matrix` row-wise (cut transient python-float peak) | 🔄 IN PROGRESS | — |
-| P6 | Single-file size guard (skip oversize, never abort) | ⬜ TODO | — |
+| P4 | Stream `load_matrix` row-wise (cut transient python-float peak) | ✅ DONE | see git log |
+| P6 | Single-file size guard (skip oversize, never abort) | 🔄 IN PROGRESS | — |
 
 Status legend: ⬜ TODO · 🔄 IN PROGRESS · ✅ DONE · ⏭️ SKIPPED
 

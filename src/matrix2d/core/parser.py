@@ -181,20 +181,32 @@ def load_matrix(path: str) -> np.ndarray:
 
     use_comma = any("," in ln for ln in content_lines)
 
-    rows: List[List[float]] = []
+    # Convert each line to a compact float64 row array as soon as it's parsed
+    # so only one row's worth of python floats is alive at a time (the
+    # python list of floats is discarded per-row instead of accumulating
+    # R*C python floats before the final np.asarray).
+    row_arrays: List[np.ndarray] = []
     for ln in content_lines:
         if use_comma:
             tokens = ln.split(",")
         else:
             tokens = ln.split()
-        rows.append([_parse_cell(tok) for tok in tokens])
+        row_list = [_parse_cell(tok) for tok in tokens]
+        row_arrays.append(np.asarray(row_list, dtype=np.float64))
 
-    max_len = max(len(r) for r in rows)
-    for r in rows:
-        if len(r) < max_len:
-            r.extend([np.nan] * (max_len - len(r)))
+    max_len = max(a.shape[0] for a in row_arrays)
+    if all(a.shape[0] == max_len for a in row_arrays):
+        return np.vstack(row_arrays)
 
-    return np.asarray(rows, dtype=np.float64)
+    padded = []
+    for a in row_arrays:
+        if a.shape[0] < max_len:
+            full = np.full(max_len, np.nan, dtype=np.float64)
+            full[: a.shape[0]] = a
+            padded.append(full)
+        else:
+            padded.append(a)
+    return np.vstack(padded)
 
 
 def load_warpage(path: str, kind: str) -> WarpageData:
