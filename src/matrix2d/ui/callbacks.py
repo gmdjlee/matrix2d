@@ -23,6 +23,7 @@ from typing import List, Optional
 import numpy as np
 from dash import ALL, Input, Output, State, dash_table, dcc, html, no_update
 
+from matrix2d.core.summary import effective_gap_series
 from matrix2d.ui import charts, helpers
 from matrix2d.ui.dialogs import pick_folder
 
@@ -79,7 +80,9 @@ _EXPORT = {
 
 
 # ---------------------------------------------------------------------------
-# ChartOptions assembled from the sidebar controls (shared by all chart tabs).
+# ChartOptions assembled from the sidebar controls. Each tab (2D / 3D / Gap)
+# owns an independent control set with its own id prefix, so styling is
+# configured per tab rather than shared.
 # ---------------------------------------------------------------------------
 
 def _build_options(title, font_family, font_size, title_size, tick_size,
@@ -114,25 +117,29 @@ def _build_options(title, font_family, font_size, title_size, tick_size,
     )
 
 
-_OPTION_STATES = [
-    State("opt-title", "value"),
-    State("opt-font-family", "value"),
-    State("opt-font-size", "value"),
-    State("opt-title-size", "value"),
-    State("opt-tick-size", "value"),
-    State("opt-x-dtick", "value"),
-    State("opt-y-dtick", "value"),
-    State("opt-colorscale", "value"),
-    State("opt-toggles", "value"),
-    State("opt-zmin", "value"),
-    State("opt-zmax", "value"),
-    State("opt-contour-levels", "value"),
-    State("opt-width", "value"),
-    State("opt-height", "value"),
+# Chart-option control ids share this suffix order for every tab; the tab's
+# prefix ("opt2d"/"opt3d"/"optgap") is prepended. Order here MUST match the
+# positional signature of _build_options.
+_OPTION_SUFFIXES = [
+    "title", "font-family", "font-size", "title-size", "tick-size",
+    "x-dtick", "y-dtick", "colorscale", "toggles", "zmin", "zmax",
+    "contour-levels", "width", "height",
 ]
 
-# Same set but as Inputs, so charts re-render live when options change.
-_OPTION_INPUTS = [Input(s.component_id, s.component_property) for s in _OPTION_STATES]
+# number of option controls per tab (used to slice *rest in render callbacks)
+_N_OPTIONS = len(_OPTION_SUFFIXES)
+
+
+def _option_states(prefix):
+    """State() list for one tab's chart-option controls, in _build_options order."""
+    return [State("{0}-{1}".format(prefix, sfx), "value")
+            for sfx in _OPTION_SUFFIXES]
+
+
+def _option_inputs(prefix):
+    """Input() list (live re-render) for one tab's chart-option controls."""
+    return [Input("{0}-{1}".format(prefix, sfx), "value")
+            for sfx in _OPTION_SUFFIXES]
 
 # Data-transform controls (Data Options panel). Order matters: the first four
 # feed the TOP config (flip / rotate / zero cell), the last two the BTM config
@@ -358,6 +365,25 @@ def register_callbacks(app):
             return path if path else no_update
 
     # -------------------------------------------------------------------
+    # 0b. Show only the active tab's Chart Options panel in the sidebar.
+    # -------------------------------------------------------------------
+    @app.callback(
+        Output("chart-options-tab-2d", "style"),
+        Output("chart-options-tab-3d", "style"),
+        Output("chart-options-tab-gap", "style"),
+        Output("chart-options-tab-effgap", "style"),
+        Input("tabs", "value"),
+    )
+    def toggle_chart_options(active_tab):
+        shown, hidden = {}, {"display": "none"}
+        return (
+            shown if active_tab == "tab-2d" else hidden,
+            shown if active_tab == "tab-3d" else hidden,
+            shown if active_tab == "tab-gap" else hidden,
+            shown if active_tab == "tab-effgap" else hidden,
+        )
+
+    # -------------------------------------------------------------------
     # 1. Scan folders -> store metas, show counts. The button starts a
     #    background thread; a dcc.Interval polls the shared _SCAN state to
     #    drive the progress bar and, when the scan finishes, publish the
@@ -558,14 +584,14 @@ def register_callbacks(app):
          Input("view2d-type", "value"),
          Input("data-show-resized", "value"),
          Input("gap-reference", "value")]
-        + _OPTION_INPUTS + _TRANSFORM_INPUTS,
+        + _option_inputs("opt2d") + _TRANSFORM_INPUTS,
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
     def render_2d(top_sample, btm_sample, phase_temp, chart_type,
                   show_resized, reference, *rest):
-        option_values = rest[:len(_OPTION_STATES)]
-        transform_values = rest[len(_OPTION_STATES):-1]
+        option_values = rest[:_N_OPTIONS]
+        transform_values = rest[_N_OPTIONS:-1]
         store_metas = rest[-1]
         if top_sample is None and btm_sample is None:
             return (_empty_fig("Select a TOP sample"),
@@ -787,14 +813,14 @@ def register_callbacks(app):
          Input("store-gaps", "data"),  # recompute -> re-render gap surfaces
          Input({"type": "z-offset", "key": ALL}, "value"),
          Input({"type": "z-offset", "key": ALL}, "id")]
-        + _OPTION_INPUTS + _TRANSFORM_INPUTS,
+        + _option_inputs("opt3d") + _TRANSFORM_INPUTS,
         State("store-metas", "data"),
         prevent_initial_call=True,
     )
     def render_3d(top_keys, btm_keys, gap_keys, out_keys, show_resized, reference,
                   _store_gaps, offset_values, offset_ids, *rest):
-        option_values = rest[:len(_OPTION_STATES)]
-        transform_values = rest[len(_OPTION_STATES):-1]
+        option_values = rest[:_N_OPTIONS]
+        transform_values = rest[_N_OPTIONS:-1]
         store_metas = rest[-1]
         selections = [("TOP", top_keys or []), ("BTM", btm_keys or []),
                       ("GAP", gap_keys or []), ("OUT", out_keys or [])]
@@ -993,6 +1019,14 @@ def register_callbacks(app):
             # parsed once here so downstream callbacks (3D dataset options)
             # don't re-run the gap-name regex on every render.
             parsed = helpers.parse_gap_name(job.out_name)
+            # Max gap per result feeds the Effective Gap chart's AVG/STD. The
+            # gap array was dropped from the result (retain_gap=False) but is
+            # in the cache the worker just registered.
+            gap_vals = helpers.get_gap(job.out_name)
+            if gap_vals is not None and np.isfinite(gap_vals).any():
+                max_gap = float(np.nanmax(gap_vals))
+            else:
+                max_gap = None
             summaries.append({
                 "out_name": job.out_name,
                 "top": os.path.basename(getattr(job.top, "path", "")),
@@ -1003,6 +1037,7 @@ def register_callbacks(app):
                 "top_no": parsed["top_no"] if parsed else None,
                 "btm_no": parsed["btm_no"] if parsed else None,
                 "temp_c": parsed["temp_c"] if parsed else None,
+                "max_gap": max_gap,
             })
 
         table_data = [{
@@ -1057,7 +1092,7 @@ def register_callbacks(app):
         Output("gap-graph-3d", "figure"),
         Output("gap-inspect-error", "children"),
         [Input("gap-result-select", "value"),
-         Input("gap-view-type", "value")] + _OPTION_INPUTS,
+         Input("gap-view-type", "value")] + _option_inputs("optgap"),
         prevent_initial_call=True,
     )
     def inspect_gap(gap_key, chart_type, *option_values):
@@ -1081,6 +1116,41 @@ def register_callbacks(app):
             logger.exception("Gap inspect render failed for %r", gap_key)
             return _empty_fig(), _empty_fig(), \
                 "Render error: " + traceback.format_exc(limit=2)
+
+    # 4c. Effective Gap tab: AVG (± sample STD) of the combo max-gaps per
+    #     temperature point, from the last compute's store-gaps.
+    @app.callback(
+        Output("effgap-graph", "figure"),
+        Output("effgap-error", "children"),
+        [Input("store-gaps", "data")] + _option_inputs("opteff"),
+        prevent_initial_call=True,
+    )
+    def render_effective_gap(store_gaps, *option_values):
+        if not store_gaps:
+            return _empty_fig("Compute gaps first"), ""
+        try:
+            # (top_no, btm_no, phase, temp_c, max_gap) rows; skip entries whose
+            # gap name did not parse (no phase/temp/combo to place them).
+            records = []
+            for s in store_gaps:
+                phase, temp = s.get("phase"), s.get("temp_c")
+                top_no, btm_no = s.get("top_no"), s.get("btm_no")
+                if None in (phase, temp, top_no, btm_no):
+                    continue
+                records.append((top_no, btm_no, phase, temp, s.get("max_gap")))
+
+            series = effective_gap_series(records)
+            if not series:
+                return _empty_fig("No valid temperature points"), ""
+
+            opts = _build_options(*option_values)
+            if not opts.title:
+                opts.title = "Effective Gap"
+            fig = charts.effective_gap_chart(series, opts)
+            return fig, ""
+        except Exception:  # noqa: BLE001
+            logger.exception("Effective Gap render failed")
+            return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
     # 5. Export current 2D / 3D figures to OUT as PNG (kaleido).
@@ -1126,6 +1196,16 @@ def register_callbacks(app):
     )
     def export_3d(_n, fig_dict, out_dir):
         return _export(fig_dict, out_dir, "chart_3d.png")
+
+    @app.callback(
+        Output("export-effgap-status", "children"),
+        Input("btn-export-effgap", "n_clicks"),
+        State("effgap-graph", "figure"),
+        State("folder-out", "value"),
+        prevent_initial_call=True,
+    )
+    def export_effgap(_n, fig_dict, out_dir):
+        return _export(fig_dict, out_dir, "effective_gap.png")
 
     # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
     #    Runs in a background thread (2*N kaleido renders would otherwise
@@ -1190,7 +1270,7 @@ def register_callbacks(app):
         [State("store-gaps", "data"),
          State("folder-out", "value"),
          State("gap-view-type", "value")]
-        + _OPTION_STATES,
+        + _option_states("optgap"),
         prevent_initial_call=True,
     )
     def start_export_all(_n, store_gaps, out_dir, chart_type, *option_values):

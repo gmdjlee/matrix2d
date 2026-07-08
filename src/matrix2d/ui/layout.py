@@ -133,43 +133,51 @@ def _data_options_panel() -> html.Div:
     )
 
 
-def _chart_options_panel() -> html.Div:
+# Chart Options are per-tab: 2D View, 3D View and Gap Compute each own an
+# independent set of controls. Each set shares this field layout but uses its
+# own id prefix ("opt2d"/"opt3d"/"optgap") so the three tabs never clobber one
+# another's styling.
+def _chart_options_panel(prefix: str, heading: str) -> html.Div:
+    """Chart Options controls with ``{prefix}-*`` ids (one per tab)."""
+    def cid(name: str) -> str:
+        return prefix + "-" + name
+
     return html.Div(
         className="panel",
         children=[
-            html.H3("Chart Options"),
+            html.H3(heading),
             html.Div(className="field", children=[
                 html.Label("Title"),
-                dcc.Input(id="opt-title", type="text", value="", className="input-full"),
+                dcc.Input(id=cid("title"), type="text", value="", className="input-full"),
             ]),
             html.Div(className="field", children=[
                 html.Label("Font family"),
-                dcc.Dropdown(id="opt-font-family",
+                dcc.Dropdown(id=cid("font-family"),
                              options=[{"label": f, "value": f} for f in FONT_FAMILIES],
                              value="Arial", clearable=False),
             ]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
-                    html.Label("Font size"), _num("opt-font-size", 12, step=1)]),
+                    html.Label("Font size"), _num(cid("font-size"), 12, step=1)]),
                 html.Div(className="field half", children=[
-                    html.Label("Title size"), _num("opt-title-size", 16, step=1)]),
+                    html.Label("Title size"), _num(cid("title-size"), 16, step=1)]),
             ]),
             html.Div(className="field", children=[
-                html.Label("Tick font size"), _num("opt-tick-size", 10, step=1)]),
+                html.Label("Tick font size"), _num(cid("tick-size"), 10, step=1)]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
-                    html.Label("X dtick"), _num("opt-x-dtick", None, step=1, placeholder="auto")]),
+                    html.Label("X dtick"), _num(cid("x-dtick"), None, step=1, placeholder="auto")]),
                 html.Div(className="field half", children=[
-                    html.Label("Y dtick"), _num("opt-y-dtick", None, step=1, placeholder="auto")]),
+                    html.Label("Y dtick"), _num(cid("y-dtick"), None, step=1, placeholder="auto")]),
             ]),
             html.Div(className="field", children=[
                 html.Label("Colorscale"),
-                dcc.Dropdown(id="opt-colorscale",
+                dcc.Dropdown(id=cid("colorscale"),
                              options=[{"label": c, "value": c} for c in COLORSCALES],
                              value="Jet", clearable=False),
             ]),
             html.Div(className="field", children=[
-                dcc.Checklist(id="opt-toggles",
+                dcc.Checklist(id=cid("toggles"),
                               options=[
                                   {"label": " Reverse colorscale", "value": "reverse"},
                                   {"label": " Show colorbar", "value": "colorbar"},
@@ -180,20 +188,39 @@ def _chart_options_panel() -> html.Div:
             ]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
-                    html.Label("zmin"), _num("opt-zmin", None, placeholder="auto")]),
+                    html.Label("zmin"), _num(cid("zmin"), None, placeholder="auto")]),
                 html.Div(className="field half", children=[
-                    html.Label("zmax"), _num("opt-zmax", None, placeholder="auto")]),
+                    html.Label("zmax"), _num(cid("zmax"), None, placeholder="auto")]),
             ]),
             html.Div(className="field", children=[
-                html.Label("Contour levels"), _num("opt-contour-levels", None, step=1, placeholder="auto")]),
+                html.Label("Contour levels"), _num(cid("contour-levels"), None, step=1, placeholder="auto")]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
-                    html.Label("Width"), _num("opt-width", None, step=10, placeholder="auto")]),
+                    html.Label("Width"), _num(cid("width"), None, step=10, placeholder="auto")]),
                 html.Div(className="field half", children=[
-                    html.Label("Height"), _num("opt-height", 500, step=10)]),
+                    html.Label("Height"), _num(cid("height"), 500, step=10)]),
             ]),
         ],
     )
+
+
+def _chart_options_stack() -> html.Div:
+    """All three per-tab Chart Options panels; only the active tab's shows.
+
+    The wrapping divs are toggled by a callback keyed on the active tab
+    (``chart-options-<tab>`` ids). 2D is visible initially to match the
+    default active tab.
+    """
+    return html.Div(children=[
+        html.Div(id="chart-options-tab-2d",
+                 children=[_chart_options_panel("opt2d", "Chart Options — 2D View")]),
+        html.Div(id="chart-options-tab-3d", style={"display": "none"},
+                 children=[_chart_options_panel("opt3d", "Chart Options — 3D View")]),
+        html.Div(id="chart-options-tab-gap", style={"display": "none"},
+                 children=[_chart_options_panel("optgap", "Chart Options — Gap Compute")]),
+        html.Div(id="chart-options-tab-effgap", style={"display": "none"},
+                 children=[_chart_options_panel("opteff", "Chart Options — Effective Gap")]),
+    ])
 
 
 def _tab_2d() -> html.Div:
@@ -337,6 +364,21 @@ def _tab_gap() -> html.Div:
     ])
 
 
+def _tab_effgap() -> html.Div:
+    return html.Div(className="tab-body", children=[
+        html.Div("Average Effective Gap per temperature point over all "
+                 "TOP-BTM combinations (from the last Gap Compute run). "
+                 "Error bars show the sample standard deviation. Heating "
+                 "points ascend, then cooling points descend.",
+                 className="status"),
+        html.Div(id="effgap-error", className="error"),
+        dcc.Graph(id="effgap-graph", className="graph"),
+        html.Button("Save current figure to OUT as PNG", id="btn-export-effgap",
+                    n_clicks=0, className="btn"),
+        html.Div(id="export-effgap-status", className="status"),
+    ])
+
+
 def build_layout() -> html.Div:
     return html.Div(className="app-root", children=[
         # ---- stores ----
@@ -357,7 +399,7 @@ def build_layout() -> html.Div:
             html.H1("Warpage Analysis"),
             _folders_panel(),
             _data_options_panel(),
-            _chart_options_panel(),
+            _chart_options_stack(),
         ]),
 
         # ---- main ----
@@ -366,6 +408,8 @@ def build_layout() -> html.Div:
                 dcc.Tab(label="2D View", value="tab-2d", children=[_tab_2d()]),
                 dcc.Tab(label="3D View", value="tab-3d", children=[_tab_3d()]),
                 dcc.Tab(label="Gap Compute", value="tab-gap", children=[_tab_gap()]),
+                dcc.Tab(label="Effective Gap", value="tab-effgap",
+                        children=[_tab_effgap()]),
             ]),
         ]),
     ])

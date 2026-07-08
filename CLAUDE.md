@@ -103,6 +103,10 @@ charts.py stays Dash-free so it ports directly to the React migration.
   `AVG`, `STD`) sit directly under the header — per-column aggregates over
   the combo cells (blanks ignored; `STD` = sample stdev, ddof=1, blank when
   <2 values). Tab-delimited; a write failure never aborts the batch.
+  `core/summary.effective_gap_series(records)` reuses the same records to
+  return per-temperature-point AVG + sample-STD as structured data for the
+  Effective Gap tab chart, ordered heating-ascending then cooling-DESCENDING
+  (differs from the file's within-phase ascending column order).
 - **Pairing**: every TOP-sample × BTM-sample combination; per TOP
   temperature, H pairs with H and C with C. TOP/BTM temps within ±2°C
   (`pipeline.TEMP_TOLERANCE_C`) count as the same temperature point —
@@ -118,6 +122,18 @@ charts.py stays Dash-free so it ports directly to the React migration.
   a module-level dict (single-user local app).
 - Chart styling flows through `ChartOptions` dataclass only — never set
   fonts/ticks ad hoc in callbacks.
+- Chart Options are PER-TAB: the sidebar holds four independent control sets
+  (`opt2d`/`opt3d`/`optgap`/`opteff` id prefixes, built by
+  `layout._chart_options_panel(prefix, heading)`); only the active tab's
+  panel shows (`callbacks.toggle_chart_options` keyed on `tabs`). Each render
+  callback reads its own prefix via `_option_inputs(prefix)` /
+  `_option_states(prefix)`; suffix order matches `_build_options`. The Gap
+  Compute batch export and inspect both use `optgap`.
+- Tabs: 2D View / 3D View / Gap Compute / Effective Gap. The Effective Gap
+  tab (`effgap-graph`) plots `summary.effective_gap_series` from `store-gaps`
+  (each result carries `max_gap`, computed from the gap cache at publish
+  time): AVG per temperature point with sample-STD as 'T' error bars,
+  y-axis "Effective Gap". Re-renders live from `store-gaps` + `opteff`.
 - `ChartOptions.show_shape` (default on) appends `rows×cols` to 2D titles
   and 3D trace names.
 - Folder paths picked via native tkinter dialog (`ui/dialogs.py`,

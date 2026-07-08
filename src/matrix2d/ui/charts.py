@@ -216,6 +216,45 @@ def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 
     return fig
 
 
+def effective_gap_chart(series: "List[dict]", options: ChartOptions) -> go.Figure:
+    """Line/marker chart of per-temperature-point average Effective Gap.
+
+    ``series`` is the list returned by ``core.summary.effective_gap_series``:
+    each item ``{"label", "avg", "std", ...}``. The AVG is plotted per
+    temperature point (x = ``label``, already chart-ordered) and the sample
+    STD is drawn as a symmetric 'T'-shaped error bar (plotly caps the bar
+    ends by default). Points with ``std is None`` (fewer than two combos)
+    render without a visible cap. The y-axis is titled "Effective Gap".
+    """
+    labels = [p["label"] for p in series]
+    avg = [p["avg"] for p in series]
+    # None std -> 0 length bar (single-combo point has no measurable spread).
+    std = [p["std"] if p.get("std") is not None else 0.0 for p in series]
+
+    trace = go.Scatter(
+        x=labels,
+        y=avg,
+        mode="lines+markers",
+        marker=dict(size=8),
+        line=dict(width=2),
+        error_y=dict(type="data", array=std, visible=True,
+                     thickness=1.5, width=8),
+        name="Effective Gap",
+    )
+    fig = go.Figure(data=[trace])
+    fig = _apply_layout(fig, options, is_3d=False, title=options.title)
+
+    zmin, zmax = _z_bounds(options)
+    y_axis = dict(title=dict(text="Effective Gap"))
+    if zmin is not None or zmax is not None:
+        y_axis["range"] = [zmin, zmax]
+    if options.y_tick_step is not None:
+        y_axis["dtick"] = options.y_tick_step
+    fig.update_yaxes(**y_axis)
+    fig.update_xaxes(title=dict(text="Temperature point"), type="category")
+    return fig
+
+
 def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: ChartOptions) -> go.Figure:
     """Several go.Surface traces in one scene.
 

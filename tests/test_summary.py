@@ -139,3 +139,53 @@ def test_stat_cells_blank_for_all_nan_column():
     _, rows = _parse(build_summary(records))
     for lbl in ("MIN", "MAX", "AVG", "STD"):
         assert rows[lbl]["H25"] == ""
+
+
+# ---------------------------------------------------------------------------
+# effective_gap_series (Effective Gap chart data)
+# ---------------------------------------------------------------------------
+
+from matrix2d.core.summary import effective_gap_series
+
+
+def test_effective_gap_series_order_heating_asc_cooling_desc():
+    records = [
+        (1, 1, "H", 25, 1.0),
+        (1, 1, "H", 80, 2.0),
+        (1, 1, "C", 25, 3.0),
+        (1, 1, "C", 80, 4.0),
+    ]
+    labels = [p["label"] for p in effective_gap_series(records)]
+    # heating ascending, then cooling descending
+    assert labels == ["H25", "H80", "C80", "C25"]
+
+
+def test_effective_gap_series_avg_and_sample_std():
+    # H25 column has combo maxes 2, 4, 6 -> avg 4, sample stdev 2.0
+    records = [
+        (1, 1, "H", 25, 2.0),
+        (1, 2, "H", 25, 4.0),
+        (1, 3, "H", 25, 6.0),
+        (1, 1, "C", 25, 10.0),
+    ]
+    by_label = {p["label"]: p for p in effective_gap_series(records)}
+    assert by_label["H25"]["avg"] == pytest.approx(4.0)
+    assert by_label["H25"]["std"] == pytest.approx(2.0)
+    assert by_label["H25"]["n"] == 3
+    # single value -> std None
+    assert by_label["C25"]["avg"] == pytest.approx(10.0)
+    assert by_label["C25"]["std"] is None
+    assert by_label["C25"]["n"] == 1
+
+
+def test_effective_gap_series_max_aggregate_and_nan_skip():
+    # duplicate (combo, point) collapses by MAX; all-NaN point is omitted.
+    records = [
+        (1, 1, "H", 25, 3.0),
+        (1, 1, "H", 25, 9.0),   # same cell -> max 9
+        (1, 1, "C", 40, float("nan")),
+    ]
+    series = effective_gap_series(records)
+    labels = [p["label"] for p in series]
+    assert labels == ["H25"]              # C40 all-NaN dropped
+    assert series[0]["avg"] == pytest.approx(9.0)

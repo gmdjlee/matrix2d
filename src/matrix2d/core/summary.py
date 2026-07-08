@@ -37,6 +37,18 @@ def _col_sort_key(col: "Tuple[str, int]") -> "Tuple[int, int]":
     return (0 if phase == "H" else 1, temp)
 
 
+def _chart_col_sort_key(col: "Tuple[str, int]") -> "Tuple[int, int]":
+    """Ordering for the Effective Gap chart x-axis.
+
+    Heating ('H') points first, ascending temperature; then cooling ('C')
+    points, DESCENDING temperature. This differs from the summary-file column
+    order (:func:`_col_sort_key`, ascending within both phases): the chart
+    reads left-to-right as the physical heat/cool cycle.
+    """
+    phase, temp = col
+    return (0, temp) if phase == "H" else (1, -temp)
+
+
 def _is_missing(val: "Optional[float]") -> bool:
     return val is None or (isinstance(val, float) and math.isnan(val))
 
@@ -121,3 +133,54 @@ def build_summary(
             cell_row.append(_fmt(v))
         lines.append(delimiter.join(cell_row))
     return "\n".join(lines) + "\n"
+
+
+def effective_gap_series(
+    records: "Iterable[Tuple[int, int, str, int, Optional[float]]]",
+) -> "List[dict]":
+    """Per-temperature-point AVG and sample-STD of the combo max-gaps.
+
+    Same aggregation as :func:`build_summary` (duplicate ``(combo, point)``
+    records collapse by MAX; None/NaN values are ignored), but returns the
+    per-column AVG/STD as structured data for the Effective Gap chart rather
+    than delimited text. Points are ordered heating-ascending then
+    cooling-descending (see :func:`_chart_col_sort_key`).
+
+    Args:
+        records: Iterable of ``(top_no, btm_no, phase, temp_c, max_gap)``.
+
+    Returns:
+        One dict per temperature point that has at least one finite combo
+        value, each ``{"label", "phase", "temp_c", "avg", "std", "n"}``.
+        ``std`` is the sample standard deviation (ddof=1), or ``None`` when
+        fewer than two finite values contribute.
+    """
+    cells = {}  # type: dict
+    cols = set()
+    rows = set()
+    for top_no, btm_no, phase, temp_c, val in records:
+        rk = (top_no, btm_no)
+        ck = (phase, temp_c)
+        rows.add(rk)
+        cols.add(ck)
+        if _is_missing(val):
+            continue
+        cur = cells.get((rk, ck))
+        cells[(rk, ck)] = val if cur is None else max(cur, val)
+
+    series = []  # type: List[dict]
+    for ck in sorted(cols, key=_chart_col_sort_key):
+        phase, temp = ck
+        vals = [cells[(rk, ck)] for rk in rows if cells.get((rk, ck)) is not None]
+        if not vals:
+            continue
+        std = statistics.stdev(vals) if len(vals) >= 2 else None
+        series.append({
+            "label": temp_point_label(phase, temp),
+            "phase": phase,
+            "temp_c": temp,
+            "avg": sum(vals) / len(vals),
+            "std": std,
+            "n": len(vals),
+        })
+    return series
