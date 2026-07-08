@@ -310,21 +310,17 @@ def _resize_pair(top_vals, btm_vals, reference):
     """Resize the non-reference side of a TOP/BTM pair to the reference grid.
 
     Same rules as run_pipeline: AUTO picks the smaller element count (tie ->
-    TOP); each side keeps its own resized blank.
+    TOP); both sides are matched to the larger blank (union of each side's
+    center-fit/cropped blank).
 
     Returns (top_vals, btm_vals, error_message).
     """
-    from matrix2d.core.resize import resize_to_reference
+    from matrix2d.core.resize import resize_pair
 
     ref = reference if reference in ("TOP", "BTM") else (
         "TOP" if top_vals.size <= btm_vals.size else "BTM")
     try:
-        if ref == "TOP":
-            btm_vals = resize_to_reference(btm_vals, top_vals,
-                                           mask_mode="own")
-        else:
-            top_vals = resize_to_reference(top_vals, btm_vals,
-                                           mask_mode="own")
+        top_vals, btm_vals = resize_pair(top_vals, btm_vals, ref)
     except ValueError as exc:
         return top_vals, btm_vals, "Resize failed: {0}".format(exc)
     return top_vals, btm_vals, ""
@@ -835,7 +831,7 @@ def register_callbacks(app):
             # Optional resize preview: bring every selected TOP/BTM dataset
             # onto one reference grid (GAP surfaces are shown as-is).
             if show_resized == "resized":
-                from matrix2d.core.resize import resize_to_reference
+                from matrix2d.core.resize import resize_crop_blank
 
                 inputs = [r for r in records if r["kind"] in ("TOP", "BTM")]
                 if len(inputs) >= 2:
@@ -844,9 +840,8 @@ def register_callbacks(app):
                         if r is ref:
                             continue
                         try:
-                            r["values"] = resize_to_reference(
-                                r["values"], ref["values"],
-                                mask_mode="own")
+                            r["values"] = resize_crop_blank(
+                                r["values"], ref["values"].shape)
                         except ValueError as exc:
                             problems.append("{0} (resize: {1})".format(
                                 _key_label(r["key"], store_metas), exc))
