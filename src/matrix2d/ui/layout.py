@@ -8,7 +8,7 @@ routing.
 import os
 from typing import Optional
 
-from dash import dcc, html
+from dash import dash_table, dcc, html
 
 # Default folder prefill: use ./demo_data/<KIND> if present, else blank.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -358,7 +358,35 @@ def _tab_gap() -> html.Div:
             ]),
             html.Div(className="gap-right", children=[
                 html.Label("Results"),
-                html.Div(id="gap-table", className="table-wrap"),
+                html.Div(className="table-wrap", children=[
+                    dash_table.DataTable(
+                        id="gap-result-table",
+                        columns=[
+                            {"name": "out_name", "id": "out_name"},
+                            {"name": "top", "id": "top"},
+                            {"name": "btm", "id": "btm"},
+                            {"name": "phase", "id": "phase"},
+                            {"name": "offset", "id": "offset"},
+                            {"name": "saved path", "id": "out_path"},
+                        ],
+                        data=[],
+                        page_action="custom",
+                        page_current=0,
+                        page_size=50,
+                        page_count=1,
+                        sort_action="custom",
+                        sort_mode="single",
+                        sort_by=[],
+                        filter_action="custom",
+                        filter_query="",
+                        fixed_rows={"headers": True},
+                        style_table={"overflowX": "auto"},
+                        style_cell={"textAlign": "left", "padding": "6px 8px",
+                                    "fontSize": "12px", "whiteSpace": "nowrap"},
+                        style_header={"backgroundColor": "#eef2f7",
+                                      "fontWeight": "bold"},
+                    ),
+                ]),
             ]),
         ]),
     ])

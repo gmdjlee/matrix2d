@@ -21,10 +21,10 @@ import traceback
 from typing import List, Optional
 
 import numpy as np
-from dash import ALL, Input, Output, State, dash_table, dcc, html, no_update
+from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.core.summary import effective_gap_series
-from matrix2d.ui import charts, helpers
+from matrix2d.ui import charts, helpers, table_paging
 from matrix2d.ui.dialogs import pick_folder
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,24 @@ _EXPORT = {
     "result": None,    # status string on success
     "error": None,     # traceback string on failure
 }
+
+# Full Gap result-table rows kept server-side so the browser only ever holds
+# one page (backend pagination). Mirrors the other module caches — fine for a
+# single-user local app. Rows are the table's own columns; store-gaps carries
+# only the fields the 3D/Effective-Gap callbacks consume.
+_GAP_TABLE_LOCK = threading.Lock()
+_GAP_TABLE = {"rows": []}  # List[dict] with keys = table_paging.COLUMN_IDS
+
+
+def _set_gap_rows(rows):
+    with _GAP_TABLE_LOCK:
+        _GAP_TABLE["rows"] = rows
+
+
+def _get_gap_rows():
+    with _GAP_TABLE_LOCK:
+        return list(_GAP_TABLE["rows"])
+
 
 # NOTE on the polling contract: the worker's outcome (result/error) is kept in
 # the state dict until the NEXT run starts — the poller must NOT clear it on
@@ -975,7 +993,6 @@ def register_callbacks(app):
 
     @app.callback(
         Output("store-gaps", "data"),
-        Output("gap-table", "children"),
         Output("gap-result-select", "options"),
         Output("gap-result-select", "value"),
         Output("gap-progress-interval", "disabled", allow_duplicate=True),
@@ -998,22 +1015,27 @@ def register_callbacks(app):
                  else "Scanning folders...")
 
         if running:
-            return (no_update, no_update, no_update, no_update,
+            return (no_update, no_update, no_update,
                     no_update, no_update, no_update, bar, label)
 
         if error is not None:
             logger.error("Compute poll: publishing pipeline error to UI:\n%s",
                          error)
-            return (no_update, no_update, no_update, no_update,
+            return (no_update, no_update, no_update,
                     True, False, "Pipeline error: " + error, bar, "Failed")
         if results is None:
             # no outcome pending (e.g. a tick right after a fresh page load)
             logger.debug("Compute poll: no pending outcome, disabling interval")
-            return (no_update, no_update, no_update, no_update,
+            return (no_update, no_update, no_update,
                     True, False, no_update, no_update, no_update)
         logger.info("Compute poll: publishing %d result(s) to UI", len(results))
 
+        # summaries: trimmed to the fields consumed downstream (3D dataset
+        # options + Effective Gap chart) so store-gaps stays small in the
+        # browser. rows: the FULL result-table data, kept server-side only
+        # (see _GAP_TABLE) so the browser never receives more than one page.
         summaries = []
+        rows = []
         for r in results:
             job = r.job
             # parsed once here so downstream callbacks (3D dataset options)
@@ -1026,44 +1048,22 @@ def register_callbacks(app):
             # was discarded forever -> progress hung).
             summaries.append({
                 "out_name": job.out_name,
-                "top": os.path.basename(getattr(job.top, "path", "")),
-                "btm": os.path.basename(getattr(job.btm, "path", "")),
                 "phase": job.phase,
-                "offset": r.result.offset,
-                "out_path": r.out_path,
                 "top_no": parsed["top_no"] if parsed else None,
                 "btm_no": parsed["btm_no"] if parsed else None,
                 "temp_c": parsed["temp_c"] if parsed else None,
                 "max_gap": r.max_gap,
             })
-
-        table_data = [{
-            "out_name": s["out_name"],
-            "top": s["top"],
-            "btm": s["btm"],
-            "phase": s["phase"],
-            "offset": "{:.4g}".format(s["offset"]) if s["offset"] is not None else "",
-            "out_path": s["out_path"],
-        } for s in summaries]
-        table = dash_table.DataTable(
-            columns=[
-                {"name": "out_name", "id": "out_name"},
-                {"name": "top", "id": "top"},
-                {"name": "btm", "id": "btm"},
-                {"name": "phase", "id": "phase"},
-                {"name": "offset", "id": "offset"},
-                {"name": "saved path", "id": "out_path"},
-            ],
-            data=table_data,
-            page_size=50,
-            sort_action="native",
-            filter_action="native",
-            fixed_rows={"headers": True},
-            style_table={"overflowX": "auto"},
-            style_cell={"textAlign": "left", "padding": "6px 8px",
-                       "fontSize": "12px", "whiteSpace": "nowrap"},
-            style_header={"backgroundColor": "#eef2f7", "fontWeight": "bold"},
-        )
+            rows.append({
+                "out_name": job.out_name,
+                "top": os.path.basename(getattr(job.top, "path", "")),
+                "btm": os.path.basename(getattr(job.btm, "path", "")),
+                "phase": job.phase,
+                "offset": "{:.4g}".format(r.result.offset)
+                          if r.result.offset is not None else "",
+                "out_path": r.out_path,
+            })
+        _set_gap_rows(rows)
 
         result_opts = [{"label": s["out_name"], "value": _gap_key(s["out_name"])}
                        for s in summaries]
@@ -1079,9 +1079,30 @@ def register_callbacks(app):
                 "Computed {n} gap(s).".format(n=len(summaries)), className="ok")
         # reset the inspect selection: out_names can be identical across runs,
         # so keeping the value would leave a chart of the previous run's data.
-        return (summaries, table, result_opts, None,
+        return (summaries, result_opts, None,
                 True, False, status, {"width": "100%"},
                 "{0} / {0} jobs — done".format(total))
+
+    # 4a-bis. Server-side pagination for the result table. The full row set
+    # lives in _GAP_TABLE (server); the browser only ever receives one page.
+    # Re-runs on page/sort/filter changes and whenever a new compute publishes
+    # store-gaps.
+    @app.callback(
+        Output("gap-result-table", "data"),
+        Output("gap-result-table", "page_count"),
+        Input("gap-result-table", "page_current"),
+        Input("gap-result-table", "page_size"),
+        Input("gap-result-table", "sort_by"),
+        Input("gap-result-table", "filter_query"),
+        Input("store-gaps", "data"),
+        prevent_initial_call=True,
+    )
+    def update_gap_table_page(page_current, page_size, sort_by, filter_query,
+                              _store_gaps):
+        rows = _get_gap_rows()
+        page, page_count = table_paging.page_view(
+            rows, page_current, page_size, sort_by, filter_query)
+        return page, page_count
 
     # 4b. Inspect a chosen computed gap: 2D contour + 3D surface.
     @app.callback(
