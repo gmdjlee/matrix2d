@@ -344,16 +344,24 @@ def test_run_pipeline_writes_summary_file(tmp_path):
     # First header cell is the (blank) corner; the rest are temp points.
     assert header[0] == ""
     assert "H240" in header and "C240" in header
+    cols = header[1:]
+    by_label = {ln.split("\t")[0]: dict(zip(cols, ln.split("\t")[1:]))
+                for ln in lines[1:]}
+    # Statistic rows sit directly under the header, then the combo rows.
+    assert [ln.split("\t")[0] for ln in lines[1:5]] == \
+        ["MIN", "MAX", "AVG", "STD"]
     # One row per TOP-BTM combo; this fixture has TOP1 x BTM2.
-    row_labels = [ln.split("\t")[0] for ln in lines[1:]]
-    assert row_labels == ["TOP1-BTM2"]
+    combo_labels = [ln.split("\t")[0] for ln in lines[5:]]
+    assert combo_labels == ["TOP1-BTM2"]
 
     # The H240 cell holds a finite max gap equal to the saved gap's max.
-    cols = header[1:]
-    cells = dict(zip(cols, lines[1].split("\t")[1:]))
     r = next(x for x in results if x.job.out_name == "TEST-H240_TOP1-BTM2.txt")
-    assert float(cells["H240"]) == pytest.approx(
-        float(np.nanmax(r.result.gap)), rel=1e-3)
+    expected = float(np.nanmax(r.result.gap))
+    assert float(by_label["TOP1-BTM2"]["H240"]) == pytest.approx(
+        expected, rel=1e-3)
+    # Single combo -> MIN/MAX/AVG equal that value, STD blank.
+    assert float(by_label["MAX"]["H240"]) == pytest.approx(expected, rel=1e-3)
+    assert by_label["STD"]["H240"] == ""
 
 
 def test_run_pipeline_progress_callback(tmp_path):

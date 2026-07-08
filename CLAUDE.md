@@ -99,8 +99,10 @@ charts.py stays Dash-free so it ports directly to the React migration.
   (`core/summary.build_summary`) with temperature-point columns
   (`{H|C}{temp}`, e.g. `H25`; heating-before-cooling then temp-ascending),
   TOP-BTM combo rows (`TOP{n}-BTM{m}`), each cell the MAX gap for that combo
-  at that point (blank if none / all-NaN). Tab-delimited; a write failure
-  never aborts the batch.
+  at that point (blank if none / all-NaN). Four stat rows (`MIN`, `MAX`,
+  `AVG`, `STD`) sit directly under the header — per-column aggregates over
+  the combo cells (blanks ignored; `STD` = sample stdev, ddof=1, blank when
+  <2 values). Tab-delimited; a write failure never aborts the batch.
 - **Pairing**: every TOP-sample × BTM-sample combination; per TOP
   temperature, H pairs with H and C with C. TOP/BTM temps within ±2°C
   (`pipeline.TEMP_TOLERANCE_C`) count as the same temperature point —

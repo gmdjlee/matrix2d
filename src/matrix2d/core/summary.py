@@ -8,10 +8,17 @@ e.g. ``H25``), each cell the MAXIMUM gap value of that combination at that
 temperature point. Columns are ordered heating-before-cooling then by
 ascending temperature; rows by (top_no, btm_no). Missing combination/point
 cells are blank.
+
+Directly under the header, four statistic rows (``MIN``, ``MAX``, ``AVG``,
+``STD``) give per-column aggregates over the combo cells at that
+temperature point (blanks ignored). ``STD`` is the sample standard
+deviation (Excel ``STDEV``, ddof=1); a column with fewer than two finite
+values leaves it blank.
 """
 
 import math
-from typing import Iterable, Optional, Tuple
+import statistics
+from typing import Iterable, List, Optional, Tuple
 
 
 def temp_point_label(phase: str, temp_c: int) -> str:
@@ -75,13 +82,42 @@ def build_summary(
     row_keys = sorted(rows)
     col_keys = sorted(cols, key=_col_sort_key)
 
+    # Finite combo values per column, for the MIN/MAX/AVG/STD rows.
+    col_values = {}  # type: dict
+    for ck in col_keys:
+        vals = [cells[(rk, ck)] for rk in row_keys
+                if cells.get((rk, ck)) is not None]
+        col_values[ck] = vals
+
+    def _fmt(v):
+        # type: (Optional[float]) -> str
+        return value_fmt.format(v) if v is not None else ""
+
+    def _stat_row(label, fn):
+        cells_out = [label]
+        for ck in col_keys:
+            vals = col_values[ck]
+            cells_out.append(_fmt(fn(vals) if vals else None))
+        return delimiter.join(cells_out)
+
+    def _std(vals):
+        # type: (List[float]) -> Optional[float]
+        return statistics.stdev(vals) if len(vals) >= 2 else None
+
     lines = []
     header = [corner] + [temp_point_label(p, t) for (p, t) in col_keys]
     lines.append(delimiter.join(header))
+
+    # Statistic rows sit directly under the header, above the combos.
+    lines.append(_stat_row("MIN", min))
+    lines.append(_stat_row("MAX", max))
+    lines.append(_stat_row("AVG", lambda v: sum(v) / len(v)))
+    lines.append(_stat_row("STD", _std))
+
     for rk in row_keys:
         cell_row = [combo_label(*rk)]
         for ck in col_keys:
             v = cells.get((rk, ck))
-            cell_row.append(value_fmt.format(v) if v is not None else "")
+            cell_row.append(_fmt(v))
         lines.append(delimiter.join(cell_row))
     return "\n".join(lines) + "\n"
