@@ -19,8 +19,8 @@ status table below.
 | Step | Title | Status | Commit |
 |------|-------|--------|--------|
 | P2 | Shared bounded, mtime-keyed raw-matrix cache (dedupe disk reads) | ✅ DONE | see git log |
-| P1 | Bound pipeline memory (drop unbounded seed + memo) | 🔄 IN PROGRESS | — |
-| P4 | Stream `load_matrix` row-wise (cut transient python-float peak) | ⬜ TODO | — |
+| P1 | Bound pipeline memory (drop unbounded seed + memo) | ✅ DONE | see git log |
+| P4 | Stream `load_matrix` row-wise (cut transient python-float peak) | 🔄 IN PROGRESS | — |
 | P6 | Single-file size guard (skip oversize, never abort) | ⬜ TODO | — |
 
 Status legend: ⬜ TODO · 🔄 IN PROGRESS · ✅ DONE · ⏭️ SKIPPED
