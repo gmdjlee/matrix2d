@@ -17,6 +17,13 @@ _FILENAME_RE = re.compile(
     r"^(?P<title>.*)_PT(?P<sample>\d{4})_(?P<time>\d{5})s\((?P<temp>\d{1,3})C\)$"
 )
 
+# Alternate format: AAAAA_YYYYYs(ZZZC)_Region N.ext -- same title/time/temp,
+# but the sample number trails as "Region N" (any digit count) instead of the
+# leading "_PTXXXX". Example: "WAFER_00125s(25C)_Region 2" -> sample 2.
+_FILENAME_REGION_RE = re.compile(
+    r"^(?P<title>.*)_(?P<time>\d{5})s\((?P<temp>\d{1,3})C\)_Region\s*(?P<sample>\d+)$"
+)
+
 # Gap filename format: {prefix}-{H|C}{temp}_TOP{n}-BTM{m}[_k].ext where prefix
 # is a free user-entered phrase and the optional _k suffix disambiguates
 # duplicate output names (_2, _3, ...). Example: TEST-C25_TOP3-BTM8.txt
@@ -59,9 +66,12 @@ def parse_filename(filename: str, kind: str, path: str = "") -> SampleMeta:
     stem, _ext = os.path.splitext(base)
     match = _FILENAME_RE.match(stem)
     if match is None:
+        match = _FILENAME_REGION_RE.match(stem)
+    if match is None:
         raise ValueError(
             "Filename '{0}' does not match expected format "
-            "'AAAAA_PTXXXX_YYYYYs(ZZZC).ext' (stem checked: '{1}')".format(
+            "'AAAAA_PTXXXX_YYYYYs(ZZZC).ext' or "
+            "'AAAAA_YYYYYs(ZZZC)_Region N.ext' (stem checked: '{1}')".format(
                 filename, stem
             )
         )
