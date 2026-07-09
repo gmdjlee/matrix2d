@@ -86,6 +86,51 @@ def test_parse_bad_names_raise(bad):
         parse_filename(bad, "TOP")
 
 
+# ---- parse_filename: Region format -------------------------------------------
+
+def test_parse_region_basic():
+    m = parse_filename("WAFER_00125s(25C)_Region 2.dat", "TOP")
+    assert m.title == "WAFER"
+    assert m.sample_no == 2
+    assert m.time_s == 125
+    assert m.temp_c == 25
+    assert m.kind == "TOP"
+
+
+def test_parse_region_no_space():
+    m = parse_filename("A_00009s(5C)_Region7.csv", "BTM")
+    assert m.sample_no == 7
+    assert m.time_s == 9
+    assert m.temp_c == 5
+
+
+def test_parse_region_multi_digit_sample_and_three_digit_temp():
+    m = parse_filename("A_12345s(260C)_Region 42.txt", "TOP")
+    assert m.sample_no == 42
+    assert m.time_s == 12345
+    assert m.temp_c == 260
+
+
+def test_parse_region_title_with_underscores():
+    m = parse_filename("LOT_A_PART_00060s(240C)_Region 3.dat", "TOP")
+    assert m.title == "LOT_A_PART"
+    assert m.sample_no == 3
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "A_0010s(30C)_Region 1.dat",     # time only 4 digits
+        "A_00010s(30)_Region 1.dat",     # missing 'C'
+        "A_00010s(30C)_Region.dat",      # missing sample number
+        "A_00010s(30C)_Region x.dat",    # non-numeric sample
+    ],
+)
+def test_parse_region_bad_names_raise(bad):
+    with pytest.raises(ValueError):
+        parse_filename(bad, "TOP")
+
+
 # ---- parse_gap_filename --------------------------------------------------------
 
 def test_parse_gap_basic():
