@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Warpage Analysis 사용 매뉴얼</title>
+<style>
+  :root{
+    --bg:#f4f6fb; --card:#ffffff; --ink:#1f2733; --muted:#5b6675;
+    --line:#e2e8f2; --brand:#2d6cdf; --brand-dk:#1b4fb0; --brand-soft:#eaf1ff;
+    --top:#e8563f; --btm:#2d8fdf; --gap:#7a4fd0; --out:#2ca86b;
+    --warn:#c9760a; --warn-soft:#fff6e6; --ok:#2ca86b; --ok-soft:#e9f7ef;
+    --shadow:0 1px 3px rgba(20,40,80,.06),0 8px 24px rgba(20,40,80,.06);
+    --mono:"Consolas","Courier New",monospace;
+    --sans:"Malgun Gothic","Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.65;font-size:15.5px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+
+  /* hero */
+  .hero{background:linear-gradient(135deg,#1b4fb0,#2d6cdf 60%,#4b86ec);
+    color:#fff;padding:52px 0 46px;box-shadow:var(--shadow)}
+  .hero h1{margin:0 0 10px;font-size:32px;letter-spacing:-.5px}
+  .hero p{margin:0;font-size:16.5px;color:#dbe6ff;max-width:640px}
+  .hero .tag{display:inline-block;background:rgba(255,255,255,.16);
+    padding:4px 12px;border-radius:999px;font-size:13px;margin-bottom:16px;
+    letter-spacing:.4px}
+
+  /* layout */
+  .grid{display:grid;grid-template-columns:220px 1fr;gap:34px;
+    align-items:start;padding:38px 0 80px}
+  nav.toc{position:sticky;top:18px;background:var(--card);border:1px solid var(--line);
+    border-radius:14px;padding:16px 14px;box-shadow:var(--shadow);font-size:14px}
+  nav.toc b{display:block;font-size:12px;letter-spacing:1px;color:var(--muted);
+    text-transform:uppercase;margin:0 0 10px 6px}
+  nav.toc a{display:block;color:var(--ink);text-decoration:none;padding:6px 8px;
+    border-radius:8px;border-left:2px solid transparent}
+  nav.toc a:hover{background:var(--brand-soft);color:var(--brand-dk);
+    border-left-color:var(--brand)}
+  nav.toc a span{color:var(--brand);font-weight:700;margin-right:6px}
+
+  main{min-width:0}
+  section{margin:0 0 42px;scroll-margin-top:18px}
+  h2{font-size:23px;margin:0 0 6px;display:flex;align-items:center;gap:12px}
+  h2 .n{flex:none;width:34px;height:34px;border-radius:9px;background:var(--brand);
+    color:#fff;display:grid;place-items:center;font-size:16px;font-weight:700}
+  h3{font-size:17px;margin:26px 0 10px;color:var(--brand-dk)}
+  .lead{color:var(--muted);margin:2px 0 18px 46px}
+  p{margin:10px 0}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:20px 22px;box-shadow:var(--shadow);margin:16px 0}
+
+  code{font-family:var(--mono);background:#eef2f9;color:#294;padding:1.5px 6px;
+    border-radius:6px;font-size:13.5px;color:#b03a5b}
+  pre{background:#0f1b2d;color:#d7e3f5;padding:14px 16px;border-radius:12px;
+    overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.55}
+  pre .c{color:#7fa7d6}
+
+  /* callouts */
+  .note,.warn,.ok{border-radius:12px;padding:13px 16px 13px 46px;margin:14px 0;
+    position:relative;font-size:14.5px}
+  .note{background:var(--brand-soft);border:1px solid #cfe0ff}
+  .warn{background:var(--warn-soft);border:1px solid #f0d9ac}
+  .ok{background:var(--ok-soft);border:1px solid #bfe6cf}
+  .note::before,.warn::before,.ok::before{position:absolute;left:15px;top:12px;
+    font-size:18px}
+  .note::before{content:"💡"} .warn::before{content:"⚠️"} .ok::before{content:"✅"}
+
+  /* pills / badges */
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12.5px;
+    font-weight:700;color:#fff;vertical-align:middle}
+  .p-top{background:var(--top)} .p-btm{background:var(--btm)}
+  .p-gap{background:var(--gap)} .p-out{background:var(--out)}
+  .kbd{font-family:var(--mono);background:#fff;border:1px solid #cbd5e6;
+    border-bottom-width:2px;border-radius:6px;padding:1px 7px;font-size:13px;color:#334}
+
+  /* steps */
+  .steps{counter-reset:s;margin:8px 0}
+  .step{position:relative;padding:4px 0 22px 52px;border-left:2px dashed var(--line);
+    margin-left:16px}
+  .step:last-child{border-left-color:transparent}
+  .step::before{counter-increment:s;content:counter(s);position:absolute;left:-16px;top:0;
+    width:32px;height:32px;border-radius:50%;background:var(--brand);color:#fff;
+    display:grid;place-items:center;font-weight:700;font-size:15px;
+    box-shadow:0 0 0 4px var(--bg)}
+  .step h4{margin:2px 0 4px;font-size:16px}
+  .step p{margin:4px 0;color:var(--muted);font-size:14.5px}
+
+  /* tables */
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px;
+    background:var(--card);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+  th,td{text-align:left;padding:10px 13px;border-bottom:1px solid var(--line)}
+  th{background:#eef2f9;font-size:12.5px;letter-spacing:.3px;text-transform:uppercase;
+    color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  td code{white-space:nowrap}
+
+  /* folder cards */
+  .folders{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:16px 0}
+  .fcard{border:1px solid var(--line);border-radius:12px;padding:15px 16px;background:var(--card);
+    box-shadow:var(--shadow);border-top:4px solid var(--brand)}
+  .fcard.top{border-top-color:var(--top)} .fcard.btm{border-top-color:var(--btm)}
+  .fcard.gap{border-top-color:var(--gap)} .fcard.out{border-top-color:var(--out)}
+  .fcard h4{margin:0 0 4px;font-size:15.5px;display:flex;align-items:center;gap:8px}
+  .fcard p{margin:0;font-size:13.5px;color:var(--muted)}
+
+  .fig{margin:18px 0;text-align:center}
+  .fig svg{max-width:100%;height:auto}
+  .cap{font-size:13px;color:var(--muted);margin-top:8px}
+
+  /* filename anatomy */
+  .fn{font-family:var(--mono);font-size:16px;background:#0f1b2d;color:#d7e3f5;
+    display:inline-flex;flex-wrap:wrap;gap:2px;padding:14px 18px;border-radius:12px;
+    align-items:flex-end;line-height:1.2}
+  .fn .seg{display:inline-flex;flex-direction:column;align-items:center;gap:6px}
+  .fn .seg b{font-size:16px}
+  .fn .seg small{font-size:10.5px;color:#8fb0da;font-family:var(--sans);white-space:nowrap}
+  .fn .h-top{color:#ff9d8c} .fn .h-num{color:#ffd66b}
+  .fn .h-btm{color:#89c4ff} .fn .h-ph{color:#c3a4ff} .fn .h-sep{color:#889}
+
+  .foot{border-top:1px solid var(--line);padding:26px 0 60px;color:var(--muted);
+    font-size:13px;text-align:center}
+
+  @media(max-width:820px){
+    .grid{grid-template-columns:1fr;gap:10px}
+    nav.toc{position:static}
+    .folders{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="tag">2D Warpage Gap Analysis · 사용 매뉴얼</span>
+    <h1>Warpage Analysis 시작 가이드</h1>
+    <p>휨(warpage) 측정 데이터를 불러와 두 면 사이의 <b>갭(gap)</b>을 계산하고,
+       2D·3D 그래프로 확인하는 프로그램입니다. 이 문서만 따라오면 처음 써도 막힘없이 사용할 수 있습니다.</p>
+  </div>
+</header>
+
+<div class="wrap">
+<div class="grid">
+
+  <nav class="toc">
+    <b>목차</b>
+    <a href="#intro"><span>1</span>이게 뭔가요?</a>
+    <a href="#start"><span>2</span>프로그램 실행</a>
+    <a href="#files"><span>3</span>데이터 준비</a>
+    <a href="#screen"><span>4</span>화면 구성</a>
+    <a href="#flow"><span>5</span>기본 사용 순서</a>
+    <a href="#tabs"><span>6</span>탭별 상세</a>
+    <a href="#options"><span>7</span>데이터 옵션</a>
+    <a href="#chart"><span>8</span>차트 옵션</a>
+    <a href="#faq"><span>9</span>문제 해결</a>
+  </nav>
+
+  <main>
+
+  <!-- 1 -->
+  <section id="intro">
+    <h2><span class="n">1</span>이게 뭔가요?</h2>
+    <p class="lead">두 개의 휜 면 사이 간격을 계산하는 도구입니다.</p>
+
+    <p>제품의 위쪽 면(<span class="pill p-top">TOP</span>)과 아래쪽 면(<span class="pill p-btm">BTM</span>)은
+       완전히 평평하지 않고 휘어 있습니다. 두 면을 마주 붙였을 때 <b>가장 먼저 닿는 지점</b>을 기준(간격 0)으로 잡고,
+       나머지 지점이 얼마나 벌어져 있는지를 계산한 것이 <span class="pill p-gap">GAP</span>입니다.</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 640 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="TOP과 BTM 면 사이 갭 개념도">
+        <defs>
+          <marker id="ar" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#7a4fd0"/>
+          </marker>
+        </defs>
+        <!-- TOP surface (wavy, above) -->
+        <path d="M60,70 Q180,40 320,80 T580,70" fill="none" stroke="#e8563f" stroke-width="4"/>
+        <text x="30" y="60" fill="#e8563f" font-size="14" font-weight="700">TOP</text>
+        <!-- BTM surface (wavy, below) -->
+        <path d="M60,170 Q200,210 340,168 T580,180" fill="none" stroke="#2d8fdf" stroke-width="4"/>
+        <text x="30" y="195" fill="#2d8fdf" font-size="14" font-weight="700">BTM</text>
+        <!-- contact point marker -->
+        <circle cx="320" cy="80" r="5" fill="#e8563f"/>
+        <circle cx="322" cy="169" r="5" fill="#2d8fdf"/>
+        <line x1="321" y1="82" x2="321" y2="167" stroke="#2ca86b" stroke-width="2" stroke-dasharray="3 3"/>
+        <text x="332" y="130" fill="#2ca86b" font-size="12" font-weight="700">최소 = 0 (첫 접촉)</text>
+        <!-- a gap arrow elsewhere -->
+        <line x1="140" y1="58" x2="140" y2="190" stroke="#7a4fd0" stroke-width="2" marker-start="url(#ar)" marker-end="url(#ar)"/>
+        <text x="80" y="130" fill="#7a4fd0" font-size="12" font-weight="700">gap ↕</text>
+      </svg>
+      <div class="cap">TOP − BTM 차이에서 가장 작은 값을 0으로 맞추면, 각 지점의 벌어진 정도(gap)가 나옵니다.</div>
+    </div>
+
+    <div class="note">계산식은 간단합니다: <code>차이 = TOP − BTM</code> → 그 중 <b>최소값을 빼서</b> 첫 접촉점이 정확히 <code>0.0</code>이 되도록 맞춥니다. 측정이 비어 있는 셀은 계산에서 자동 제외됩니다.</div>
+  </section>
+
+  <!-- 2 -->
+  <section id="start">
+    <h2><span class="n">2</span>프로그램 실행</h2>
+    <p class="lead">웹 브라우저에서 열리는 로컬 프로그램입니다.</p>
+
+    <p>이 프로그램은 내 PC에서만 도는 웹 앱입니다. 실행하면 브라우저 주소창에
+       <code>http://127.0.0.1:8050</code> 페이지가 열립니다. 인터넷 연결은 필요 없습니다.</p>
+
+    <div class="steps">
+      <div class="step">
+        <h4>프로그램 폴더 열기</h4>
+        <p>프로젝트 폴더 안에서 명령 프롬프트(터미널)를 엽니다.</p>
+      </div>
+      <div class="step">
+        <h4>실행 명령 입력</h4>
+        <pre>python run_app.py</pre>
+        <p><span class="c">// 잠시 후 "Starting Dash app on port 8050" 메시지가 나옵니다.</span></p>
+      </div>
+      <div class="step">
+        <h4>브라우저에서 열기</h4>
+        <p>Chrome·Edge 등에서 <code>http://127.0.0.1:8050</code> 로 접속합니다.
+           (자동으로 열리지 않으면 직접 주소를 입력하세요.)</p>
+      </div>
+      <div class="step">
+        <h4>종료</h4>
+        <p>터미널에서 <span class="kbd">Ctrl</span> + <span class="kbd">C</span> 를 누르면 프로그램이 종료됩니다.</p>
+      </div>
+    </div>
+
+    <div class="note">처음이라 데이터가 없다면, 예제 데이터를 만들 수 있습니다:
+      <code>python scripts/make_sample_data.py</code> → <code>demo_data/</code> 폴더에 TOP/BTM/GAP/OUT 예제가 생성되고, 프로그램이 자동으로 이 경로를 채워줍니다.</div>
+  </section>
+
+  <!-- 3 -->
+  <section id="files">
+    <h2><span class="n">3</span>데이터 준비</h2>
+    <p class="lead">4가지 폴더와 파일 이름 규칙만 지키면 됩니다.</p>
+
+    <h3>4개의 폴더</h3>
+    <div class="folders">
+      <div class="fcard top">
+        <h4><span class="pill p-top">TOP</span> 위쪽 면</h4>
+        <p>위쪽 면의 휨 측정 데이터 파일들.</p>
+      </div>
+      <div class="fcard btm">
+        <h4><span class="pill p-btm">BTM</span> 아래쪽 면</h4>
+        <p>아래쪽 면의 휨 측정 데이터 파일들.</p>
+      </div>
+      <div class="fcard gap">
+        <h4><span class="pill p-gap">GAP</span> 기존 갭 결과</h4>
+        <p>이미 계산돼 있는 갭 파일(있으면 불러와서 볼 수 있음). 없어도 됩니다.</p>
+      </div>
+      <div class="fcard out">
+        <h4><span class="pill p-out">OUT</span> 결과 저장</h4>
+        <p>프로그램이 계산한 갭·이미지를 <b>저장하는</b> 위치.</p>
+      </div>
+    </div>
+    <p>갭을 새로 계산하려면 <span class="pill p-top">TOP</span> 과 <span class="pill p-btm">BTM</span> 두 폴더만 있으면 됩니다.
+       <span class="pill p-out">OUT</span> 은 저장 위치라 미리 비어 있어도 괜찮습니다.</p>
+
+    <h3>파일 형식</h3>
+    <table>
+      <tr><th>항목</th><th>내용</th></tr>
+      <tr><td>확장자</td><td><code>.dat</code> · <code>.csv</code> · <code>.txt</code></td></tr>
+      <tr><td>구조</td><td>숫자만 들어간 2D 격자. <b>제목 줄·행 번호 없음</b></td></tr>
+      <tr><td>빈 셀 처리</td><td>빈 칸, <code>nan</code>, 또는 <code>2000</code> 이상의 값 → 자동으로 "측정 없음" 처리</td></tr>
+    </table>
+
+    <h3>TOP / BTM 파일 이름 규칙</h3>
+    <p>파일 이름에서 <b>샘플 번호</b>, <b>시간</b>, <b>온도</b>를 읽어냅니다. 아래 형식을 지켜주세요.</p>
+    <div class="fig" style="text-align:left">
+      <span class="fn">
+        <span class="seg"><b>TITLE</b><small>제목(자유)</small></span>
+        <span class="seg h-sep"><b>_</b><small></small></span>
+        <span class="seg h-top"><b>PT0003</b><small>PT+4자리 샘플번호</small></span>
+        <span class="seg h-sep"><b>_</b><small></small></span>
+        <span class="seg h-num"><b>01200s</b><small>5자리 초 + s</small></span>
+        <span class="seg h-ph"><b>(25C)</b><small>온도 + C, 괄호</small></span>
+        <span class="seg h-sep"><b>.txt</b><small></small></span>
+      </span>
+    </div>
+    <p style="margin-top:6px">예: <code>PANEL_A_PT0003_01200s(25C).txt</code> → 샘플 <b>3번</b>, <b>1200초</b>, <b>25℃</b></p>
+    <div class="note">제목(TITLE)에는 <code>_</code> 밑줄이 들어가도 됩니다. 프로그램은 <b>마지막 <code>_PT</code></b> 를 기준으로 이름을 해석하기 때문입니다.</div>
+
+    <h3>GAP / OUT 파일 이름 규칙</h3>
+    <p>계산 결과 파일은 아래 형식입니다. GAP·OUT 폴더의 파일도 같은 형식으로 읽습니다.</p>
+    <pre>{prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt</pre>
+    <p>예: <code>TEST-C25_TOP3-BTM8.txt</code> → 접두어 <code>TEST</code>, 냉각(<code>C</code>) 25℃, TOP 3번 × BTM 8번</p>
+    <table>
+      <tr><th>기호</th><th>의미</th></tr>
+      <tr><td><code>H</code> / <code>C</code></td><td>H = 가열(Heating), C = 냉각(Cooling)</td></tr>
+      <tr><td><code>{temp}</code></td><td>온도(℃)</td></tr>
+      <tr><td><code>TOP{n}</code>-<code>BTM{m}</code></td><td>TOP 샘플 n번과 BTM 샘플 m번의 조합</td></tr>
+    </table>
+  </section>
+
+  <!-- 4 -->
+  <section id="screen">
+    <h2><span class="n">4</span>화면 구성</h2>
+    <p class="lead">왼쪽은 설정, 오른쪽은 그래프. 두 영역만 기억하세요.</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 640 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="화면 배치도">
+        <rect x="0" y="0" width="640" height="340" rx="12" fill="#ffffff" stroke="#e2e8f2"/>
+        <!-- sidebar -->
+        <rect x="12" y="12" width="200" height="316" rx="9" fill="#eaf1ff" stroke="#cfe0ff"/>
+        <text x="26" y="40" font-size="14" font-weight="700" fill="#1b4fb0">Warpage Analysis</text>
+        <rect x="26" y="54" width="172" height="66" rx="7" fill="#fff" stroke="#cfe0ff"/>
+        <text x="36" y="74" font-size="11" font-weight="700" fill="#2d6cdf">📁 Folders</text>
+        <text x="36" y="92" font-size="9.5" fill="#5b6675">TOP / BTM / GAP / OUT 경로</text>
+        <text x="36" y="108" font-size="9.5" fill="#2ca86b">▸ [ Scan ] 버튼</text>
+        <rect x="26" y="128" width="172" height="58" rx="7" fill="#fff" stroke="#cfe0ff"/>
+        <text x="36" y="148" font-size="11" font-weight="700" fill="#2d6cdf">⚙ Data Options</text>
+        <text x="36" y="166" font-size="9.5" fill="#5b6675">뒤집기·회전·기준크기</text>
+        <rect x="26" y="194" width="172" height="120" rx="7" fill="#fff" stroke="#cfe0ff"/>
+        <text x="36" y="214" font-size="11" font-weight="700" fill="#2d6cdf">🎨 Chart Options</text>
+        <text x="36" y="232" font-size="9.5" fill="#5b6675">제목·색·크기 등</text>
+        <text x="36" y="250" font-size="9.5" fill="#5b6675">(탭마다 별도)</text>
+        <!-- main -->
+        <rect x="224" y="12" width="404" height="316" rx="9" fill="#f8fafd" stroke="#e2e8f2"/>
+        <!-- tabs -->
+        <rect x="236" y="24" width="86" height="26" rx="6" fill="#2d6cdf"/>
+        <text x="252" y="41" font-size="10.5" font-weight="700" fill="#fff">2D View</text>
+        <rect x="326" y="24" width="86" height="26" rx="6" fill="#e6edf7"/>
+        <text x="342" y="41" font-size="10.5" fill="#5b6675">3D View</text>
+        <rect x="416" y="24" width="98" height="26" rx="6" fill="#e6edf7"/>
+        <text x="428" y="41" font-size="10.5" fill="#5b6675">Gap Compute</text>
+        <rect x="518" y="24" width="98" height="26" rx="6" fill="#e6edf7"/>
+        <text x="528" y="41" font-size="10.5" fill="#5b6675">Effective Gap</text>
+        <!-- content -->
+        <rect x="236" y="64" width="380" height="30" rx="6" fill="#fff" stroke="#e2e8f2"/>
+        <text x="248" y="83" font-size="10" fill="#5b6675">▾ 샘플·온도 선택 컨트롤</text>
+        <rect x="236" y="104" width="185" height="140" rx="8" fill="#fff" stroke="#e2e8f2"/>
+        <rect x="431" y="104" width="185" height="140" rx="8" fill="#fff" stroke="#e2e8f2"/>
+        <text x="300" y="180" font-size="11" fill="#9aa7b8">📊 그래프</text>
+        <text x="495" y="180" font-size="11" fill="#9aa7b8">📊 그래프</text>
+      </svg>
+      <div class="cap">왼쪽 사이드바(폴더·데이터 옵션·차트 옵션) + 오른쪽 메인(4개 탭).</div>
+    </div>
+
+    <table>
+      <tr><th>영역</th><th>역할</th></tr>
+      <tr><td>📁 Folders</td><td>4개 폴더 경로 입력 + <code>Scan</code>(데이터 읽기) 버튼</td></tr>
+      <tr><td>⚙ Data Options</td><td>TOP 뒤집기·회전, 영점(zero) 셀, 기준 크기, 표시 방식</td></tr>
+      <tr><td>🎨 Chart Options</td><td>그래프 제목·글꼴·색상·크기 — <b>탭마다 따로</b> 저장됨</td></tr>
+      <tr><td>메인 탭</td><td>2D View · 3D View · Gap Compute · Effective Gap</td></tr>
+    </table>
+  </section>
+
+  <!-- 5 -->
+  <section id="flow">
+    <h2><span class="n">5</span>기본 사용 순서</h2>
+    <p class="lead">이 5단계가 전체 흐름입니다.</p>
+
+    <div class="fig">
+      <svg viewBox="0 0 640 90" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="워크플로우 5단계">
+        <defs><marker id="fa" markerWidth="9" markerHeight="9" refX="5" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#2d6cdf"/></marker></defs>
+        <g font-size="11" font-weight="700" text-anchor="middle">
+          <rect x="8" y="26" width="104" height="40" rx="9" fill="#eaf1ff" stroke="#2d6cdf"/>
+          <text x="60" y="44" fill="#1b4fb0">경로 입력</text><text x="60" y="59" fill="#5b6675" font-weight="400" font-size="9.5">폴더 지정</text>
+          <line x1="116" y1="46" x2="140" y2="46" stroke="#2d6cdf" stroke-width="2" marker-end="url(#fa)"/>
+          <rect x="144" y="26" width="104" height="40" rx="9" fill="#eaf1ff" stroke="#2d6cdf"/>
+          <text x="196" y="44" fill="#1b4fb0">Scan</text><text x="196" y="59" fill="#5b6675" font-weight="400" font-size="9.5">데이터 읽기</text>
+          <line x1="252" y1="46" x2="276" y2="46" stroke="#2d6cdf" stroke-width="2" marker-end="url(#fa)"/>
+          <rect x="280" y="26" width="104" height="40" rx="9" fill="#eaf1ff" stroke="#2d6cdf"/>
+          <text x="332" y="44" fill="#1b4fb0">옵션 확인</text><text x="332" y="59" fill="#5b6675" font-weight="400" font-size="9.5">뒤집기/회전</text>
+          <line x1="388" y1="46" x2="412" y2="46" stroke="#2d6cdf" stroke-width="2" marker-end="url(#fa)"/>
+          <rect x="416" y="26" width="112" height="40" rx="9" fill="#efe8fb" stroke="#7a4fd0"/>
+          <text x="472" y="44" fill="#5a34a8">Gap 계산</text><text x="472" y="59" fill="#5b6675" font-weight="400" font-size="9.5">Compute All</text>
+          <line x1="532" y1="46" x2="556" y2="46" stroke="#2d6cdf" stroke-width="2" marker-end="url(#fa)"/>
+          <rect x="560" y="26" width="72" height="40" rx="9" fill="#e9f7ef" stroke="#2ca86b"/>
+          <text x="596" y="44" fill="#1f7a4d">결과 확인</text><text x="596" y="59" fill="#5b6675" font-weight="400" font-size="9.5">그래프/표</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <h4>폴더 경로 지정</h4>
+        <p>사이드바 <b>Folders</b> 에서 각 칸에 경로를 입력하거나 <code>Browse...</code> 버튼으로 폴더를 고릅니다.
+           갭 계산만 할 거면 TOP·BTM·OUT 세 칸이면 충분합니다.</p>
+      </div>
+      <div class="step">
+        <h4><code>Scan</code> 눌러 데이터 읽기</h4>
+        <p>진행 막대가 차고, 파일을 검사해서 유효한 것만 불러옵니다. 이름·내용이 규칙에 안 맞는 파일은
+           <b>조용히 건너뜁니다</b>(전체가 멈추지 않음). 스캔 후 각 탭의 선택 목록이 채워집니다.</p>
+      </div>
+      <div class="step">
+        <h4>데이터 옵션 점검 (필요할 때만)</h4>
+        <p>측정 방향이 뒤집혀 있거나 회전이 필요하면 <b>Data Options</b> 에서 조정합니다. 기본값 그대로도 대부분 동작합니다.</p>
+      </div>
+      <div class="step">
+        <h4><b>Gap Compute</b> 탭 → <code>Compute All Gaps</code></h4>
+        <p>모든 TOP × BTM 조합의 갭을 한 번에 계산합니다. 결과 파일이 OUT 폴더에 저장되고, 오른쪽 표에 목록이 나옵니다.</p>
+      </div>
+      <div class="step">
+        <h4>결과 확인</h4>
+        <p>표에서 결과를 고르면 왼쪽에 2D·3D 그래프가 뜹니다. 온도별 평균 갭은 <b>Effective Gap</b> 탭에서 봅니다.</p>
+      </div>
+    </div>
+
+    <div class="ok">여기까지가 핵심입니다. 아래 6~8번은 각 탭·옵션의 세부 설명이니, 필요할 때 찾아보면 됩니다.</div>
+  </section>
+
+  <!-- 6 -->
+  <section id="tabs">
+    <h2><span class="n">6</span>탭별 상세</h2>
+    <p class="lead">메인 화면 위쪽 4개 탭.</p>
+
+    <h3>📊 2D View — 한 면씩 평면으로 보기</h3>
+    <div class="card">
+      <p>TOP 샘플과 BTM 샘플을 하나씩 골라 나란히 평면 그래프로 확인합니다.</p>
+      <ul>
+        <li><b>TOP sample / BTM sample</b> — 볼 샘플을 선택</li>
+        <li><b>Temperature (common)</b> — 두 샘플에 공통으로 있는 온도 선택</li>
+        <li><b>Chart type</b> — <code>Heatmap</code>(색 격자) 또는 <code>Contour</code>(등고선)</li>
+        <li><b>Save current figures to OUT as PNG</b> — 현재 두 그래프를 이미지로 저장</li>
+      </ul>
+    </div>
+
+    <h3>🧊 3D View — 여러 면을 입체로 겹쳐 보기</h3>
+    <div class="card">
+      <p>TOP·BTM·GAP·OUT 데이터를 여러 개 골라 3D 곡면으로 함께 표시합니다.</p>
+      <ul>
+        <li><b>Filter: sample no. / temperature</b> — 목록을 샘플·온도로 좁히기</li>
+        <li><b>TOP / BTM / GAP / OUT datasets</b> — 각 종류에서 표시할 데이터 다중 선택</li>
+        <li><b>z-offset</b> — 선택한 데이터마다 위아래 높이를 띄워 겹침을 분리 (선택 시 자동으로 입력칸 생김)</li>
+        <li><b>Save current figure to OUT as PNG</b> — 현재 3D 화면 저장</li>
+      </ul>
+    </div>
+
+    <h3>🟣 Gap Compute — 갭 계산 (핵심 탭)</h3>
+    <div class="card">
+      <p>모든 TOP × BTM 조합의 갭을 한꺼번에 계산하고 결과를 저장·확인합니다.</p>
+      <ul>
+        <li><b>Output name prefix</b> — 저장 파일 이름 앞에 붙일 접두어 (예: <code>TEST</code>). 비우면 <code>GAP</code></li>
+        <li><b>Compute All Gaps</b> — 전체 조합 계산 시작 (진행 막대 표시, 백그라운드 처리)</li>
+        <li><b>Save All Images (2D+3D)</b> — 계산된 각 결과를 <code>_2D.png</code>·<code>_3D.png</code> 로 일괄 저장</li>
+        <li><b>왼쪽</b>: 결과 하나를 골라 2D·3D 그래프로 확인 / <b>오른쪽</b>: 결과 목록 표(정렬·필터·페이지 지원)</li>
+      </ul>
+      <p style="margin-bottom:0">저장 파일: <code>{prefix}-{H|C}{temp}_TOP{n}-BTM{m}.txt</code> (탭 구분). 같은 이름이 겹치면 <code>_2</code>, <code>_3</code> 이 붙습니다.
+         전체 요약표 <code>{prefix}.txt</code> 도 함께 저장됩니다.</p>
+    </div>
+    <div class="note">계산 중 다른 탭으로 이동해도 계산은 계속됩니다. 온도가 <b>±2℃</b> 이내면 같은 온도점으로 취급해 짝을 맞춥니다.</div>
+
+    <h3>📈 Effective Gap — 온도별 평균 갭</h3>
+    <div class="card">
+      <p>마지막 Gap Compute 결과를 바탕으로, <b>온도점마다 모든 TOP-BTM 조합의 평균 갭</b>을 선그래프로 보여줍니다.
+         오차 막대는 표준편차입니다. 가열 구간이 오름차순으로, 이어서 냉각 구간이 내림차순으로 배치됩니다.</p>
+      <p style="margin-bottom:0"><b>Save current figure to OUT as PNG</b> 로 저장할 수 있습니다.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="options">
+    <h2><span class="n">7</span>데이터 옵션</h2>
+    <p class="lead">측정 방향·기준 크기를 맞추는 사이드바 설정.</p>
+
+    <table>
+      <tr><th>옵션</th><th>설명</th></tr>
+      <tr><td><b>Flip TOP</b></td><td>TOP을 좌우로 뒤집고 값의 부호도 반전. 측정 좌표계가 반대일 때 사용</td></tr>
+      <tr><td><b>TOP Rotate</b></td><td>TOP을 시계방향 <code>0/90/180/270°</code> 회전</td></tr>
+      <tr><td><b>TOP/BTM Zero cell</b></td><td>지정한 (행, 열) 셀의 값을 0으로 맞춤(영점). 좌표는 <b>뒤집기·회전 후</b> 기준</td></tr>
+      <tr><td><b>Reference size</b></td><td>두 면 크기가 다를 때 어느 격자에 맞출지. <code>Auto</code>=작은 쪽에 맞춤 / <code>TOP</code> / <code>BTM</code> 직접 지정</td></tr>
+      <tr><td><b>Display data</b></td><td><code>Original</code>=원본 그대로 / <code>Resized</code>=실제 갭 계산에 쓰이는 정렬된 모습으로 미리보기</td></tr>
+    </table>
+
+    <div class="note">순서 규칙: <b>뒤집기 → 회전 → 영점</b> 순으로 적용됩니다. 그래서 영점 셀의 (행, 열)은 뒤집기·회전이 끝난 상태의 위치를 넣어야 합니다.</div>
+    <div class="warn">영점 셀로 <b>측정이 없는 빈 칸</b>이나 격자 밖 좌표를 지정하면 오류가 납니다. 값이 있는 셀을 지정하세요.</div>
+  </section>
+
+  <!-- 8 -->
+  <section id="chart">
+    <h2><span class="n">8</span>차트 옵션</h2>
+    <p class="lead">그래프 겉모습 꾸미기. 탭마다 독립적으로 저장됩니다.</p>
+
+    <p>사이드바 <b>Chart Options</b> 는 현재 보고 있는 탭에 맞춰 바뀝니다. 즉 2D·3D·Gap·Effective Gap 각각의 설정이 따로 유지됩니다.</p>
+    <table>
+      <tr><th>항목</th><th>설명</th></tr>
+      <tr><td>Title</td><td>그래프 제목</td></tr>
+      <tr><td>Font family / size</td><td>글꼴과 크기(본문·제목·눈금 각각)</td></tr>
+      <tr><td>X/Y dtick</td><td>축 눈금 간격 (비우면 자동)</td></tr>
+      <tr><td>Colorscale</td><td>색상표 (<code>Jet</code>, <code>Viridis</code>, <code>RdBu</code> 등)</td></tr>
+      <tr><td>Reverse colorscale</td><td>색 순서 뒤집기</td></tr>
+      <tr><td>Show colorbar</td><td>색 범례 막대 표시</td></tr>
+      <tr><td>Show shape</td><td>제목/이름에 <code>행×열</code> 크기 표시</td></tr>
+      <tr><td>Match data aspect</td><td>데이터 비율에 맞춰 가로세로 유지</td></tr>
+      <tr><td>zmin / zmax</td><td>색 범위 최소·최대 고정 (비우면 자동)</td></tr>
+      <tr><td>Contour levels</td><td>등고선 개수</td></tr>
+      <tr><td>Width / Height</td><td>그래프 크기(px)</td></tr>
+    </table>
+  </section>
+
+  <!-- 9 -->
+  <section id="faq">
+    <h2><span class="n">9</span>문제 해결</h2>
+    <p class="lead">자주 겪는 상황과 해결법.</p>
+
+    <h3>Scan을 눌렀는데 "데이터 없음" 오류가 나요</h3>
+    <p>폴더 경로가 맞는지, 파일 <b>이름 규칙</b>(3장)과 <b>내용 형식</b>(숫자 격자, 제목/행번호 없음)이 맞는지 확인하세요.
+       규칙에 안 맞는 파일은 자동으로 제외되어 유효 파일이 0개가 되면 이 메시지가 나옵니다.</p>
+
+    <h3>파일 목록에 특정 파일이 안 보여요</h3>
+    <p>그 파일이 이름 또는 내용 검사에서 걸러졌을 가능성이 큽니다. 로그 파일에 건너뛴 이유가 기록됩니다:
+       <code>logs/matrix2d.log</code>.</p>
+
+    <h3>진행 막대가 멈춘 것처럼 보여요</h3>
+    <p>큰 파일이 많으면 시간이 걸립니다. 계산은 백그라운드에서 진행되며, 계산 중 다른 탭으로 이동해도 됩니다.
+       페이지를 <b>새로고침하면 진행 중이던 작업과 화면 상태가 초기화</b>되니 피하세요.</p>
+
+    <h3>브라우저 페이지를 새로고침해도 되나요?</h3>
+    <div class="warn">가급적 하지 마세요. 새로고침하면 불러온 데이터·계산 결과 상태가 사라집니다. 다시 <code>Scan</code>부터 해야 합니다.</div>
+
+    <h3>결과 파일은 어디에 저장되나요?</h3>
+    <p><span class="pill p-out">OUT</span> 폴더에 저장됩니다. 갭 파일(<code>.txt</code>), 요약표(<code>{prefix}.txt</code>), 이미지(<code>_2D.png</code>·<code>_3D.png</code>)가 이곳에 쌓입니다.</p>
+
+    <h3>실행 관련 참고</h3>
+    <table>
+      <tr><th>상황</th><th>방법</th></tr>
+      <tr><td>예제 데이터 생성</td><td><code>python scripts/make_sample_data.py</code></td></tr>
+      <tr><td>프로그램 실행</td><td><code>python run_app.py</code> → <code>http://127.0.0.1:8050</code></td></tr>
+      <tr><td>종료</td><td>터미널에서 <span class="kbd">Ctrl</span>+<span class="kbd">C</span></td></tr>
+      <tr><td>로그 확인</td><td><code>logs/matrix2d.log</code></td></tr>
+    </table>
+  </section>
+
+  </main>
+</div>
+</div>
+
+<div class="foot">
+  Warpage Analysis · 2D Matrix Gap Analysis Tool — 사용 매뉴얼<br>
+  이 문서는 오프라인에서 열립니다. 브라우저에서 바로 여세요.
+</div>
+
+</body>
+</html>
