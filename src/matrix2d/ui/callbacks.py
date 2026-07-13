@@ -408,7 +408,8 @@ def _pick_reference_record(records, reference):
 def register_callbacks(app):
     # -------------------------------------------------------------------
     # 0. Folder Browse... buttons -> native directory dialog. One callback
-    #    per folder input; cancel / headless -> no_update.
+    #    per folder input; cancel / headless -> no_update. The ✕ button next
+    #    to each input clears that path (scan skips empty folders).
     # -------------------------------------------------------------------
     for _kind in ("top", "btm", "gap", "out"):
         @app.callback(
@@ -420,6 +421,15 @@ def register_callbacks(app):
         def browse_folder(_n, current, _kind=_kind):  # bind loop var
             path = pick_folder(current or "")
             return path if path else no_update
+
+        @app.callback(
+            Output("folder-{0}".format(_kind), "value", allow_duplicate=True),
+            Input("btn-clear-{0}".format(_kind), "n_clicks"),
+            prevent_initial_call=True,
+        )
+        def clear_folder(_n, _kind=_kind):  # bind loop var
+            logger.info("Folder path cleared: %s", _kind.upper())
+            return ""
 
     # -------------------------------------------------------------------
     # 0b. Show only the active tab's Chart Options panel in the sidebar.
@@ -1229,23 +1239,29 @@ def register_callbacks(app):
             records.append([top_no, btm_no, phase, temp, s.get("max_gap")])
         return records
 
-    # 4c-ii. Load button -> records. Builds records straight from the scanned
-    #        OUT bucket (already-computed gap files), loading each matrix via
-    #        the shared repository cache. Synchronous (batch is small enough).
+    # 4c-ii. Load button -> records. Scans the OUT folder itself (path from
+    #        the sidebar input) so loading already-computed gap files never
+    #        depends on the Scan button having run. Matrices load via the
+    #        shared repository cache. Synchronous (batch is small enough).
     @app.callback(
         Output("store-effgap-records", "data", allow_duplicate=True),
         Output("effgap-load-status", "children"),
         Input("btn-effgap-load", "n_clicks"),
-        State("store-metas", "data"),
+        State("folder-out", "value"),
         prevent_initial_call=True,
     )
-    def load_effgap_from_out(_n, metas):
-        if not metas:
-            return no_update, "OUT 데이터 없음 — 먼저 Scan 실행"
-        out_metas = metas.get("OUT") or []
+    def load_effgap_from_out(_n, out_dir):
+        if not out_dir:
+            return no_update, "OUT 폴더를 설정하세요 (set the OUT folder first)."
+        from matrix2d.services.repository import read_matrix, scan_folder
+        try:
+            out_metas = scan_folder(out_dir, "GAP")
+        except Exception as exc:  # noqa: BLE001 - surface any scan error
+            logger.exception("Effective Gap load: OUT scan failed for %r",
+                             out_dir)
+            return no_update, "Scan error: {0}".format(exc)
         if not out_metas:
-            return no_update, "OUT 데이터 없음 — 먼저 Scan 실행"
-        from matrix2d.services.repository import read_matrix
+            return no_update, "OUT 데이터 없음 (no valid gap files)"
         records, skipped = helpers.effgap_records_from_metas(out_metas, read_matrix)
         records = [list(r) for r in records]  # JSON-safe lists for the store
         msg = "Loaded {0} OUT file(s)".format(len(records))

@@ -25,7 +25,7 @@ COLORSCALES = ["Jet", "Viridis", "Plasma", "RdBu", "Turbo", "Greys"]
 
 
 def _folder_field(kind: str) -> html.Div:
-    """One folder row: label, path input and a Browse... dialog button."""
+    """One folder row: label, path input, Browse... dialog and Clear buttons."""
     lower = kind.lower()
     return html.Div(className="field", children=[
         html.Label(kind),
@@ -36,6 +36,8 @@ def _folder_field(kind: str) -> html.Div:
                       className="input-full grow"),
             html.Button("Browse...", id="btn-browse-" + lower, n_clicks=0,
                         className="btn", title="Select {0} folder".format(kind)),
+            html.Button("✕", id="btn-clear-" + lower, n_clicks=0,
+                        className="btn", title="Clear {0} path".format(kind)),
         ]),
     ])
 
