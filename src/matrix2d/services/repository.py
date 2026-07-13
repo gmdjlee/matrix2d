@@ -109,9 +109,10 @@ def scan_folder(
     """Scan a folder for parseable measurement files.
 
     Files matching *.dat/*.csv/*.txt are parsed; files whose NAME or CONTENT
-    does not match the expected format are skipped with a logged warning
-    (content is validated by loading the matrix once). Results are sorted by
-    (sample_no, time_s).
+    does not match the expected format are skipped (content is validated by
+    loading the matrix once). Individual skipped files are NOT logged; instead
+    one summary line is emitted after the scan with counts by reason (bad name,
+    bad content, I/O) — no filenames. Results are sorted by (sample_no, time_s).
 
     Args:
         folder: Directory to scan.
@@ -131,17 +132,45 @@ def scan_folder(
     total = len(paths)
 
     metas: List[SampleMeta] = []
+    bad_name = 0     # filename did not parse (ValueError from parse)
+    bad_content = 0  # matrix content did not load (ValueError from read)
+    io_err = 0       # file could not be stat'd / read (OSError)
     for done, path in enumerate(paths, start=1):
+        meta = None  # type: Optional[SampleMeta]
         try:
             meta = parse_data_filename(path, kind, path=path)
-            mat = read_matrix(path)  # content validation; also cached below
-            if matrix_cache is not None:
-                matrix_cache[path] = mat
-            metas.append(meta)
-        except (ValueError, OSError) as exc:
-            logger.warning("Skipping invalid data file '%s': %s", path, exc)
+        except ValueError:
+            bad_name += 1
+        except OSError:
+            io_err += 1
+        if meta is not None:
+            try:
+                mat = read_matrix(path)  # content validation; also cached below
+            except ValueError:
+                bad_content += 1
+            except OSError:
+                io_err += 1
+            else:
+                if matrix_cache is not None:
+                    matrix_cache[path] = mat
+                metas.append(meta)
         if progress_cb is not None:
             progress_cb(done, total)
+
+    skipped = bad_name + bad_content + io_err
+    if skipped:
+        logger.warning(
+            "Folder scan %r (%s): %d files, %d valid, %d skipped "
+            "(bad name: %d, bad content: %d, I/O: %d)",
+            folder, kind, total, len(metas), skipped,
+            bad_name, bad_content, io_err,
+        )
+    else:
+        logger.info(
+            "Folder scan %r (%s): %d files, %d valid",
+            folder, kind, total, len(metas),
+        )
+
     metas.sort(key=lambda m: (m.sample_no, m.time_s))
     return metas
 

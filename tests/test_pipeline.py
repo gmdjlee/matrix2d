@@ -403,6 +403,54 @@ def test_run_pipeline_bounded_xform_cache_still_correct(tmp_path):
         )
 
 
+def test_run_pipeline_unexpected_error_is_collected(tmp_path, monkeypatch, caplog):
+    # An unexpected (non-ValueError/OSError) error in ONE job must not abort the
+    # batch; the rest still run and the failure is recorded in the list.
+    from matrix2d.services import pipeline as pl
+
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    real_resize = pl.resize_pair
+    state = {"raised": False}
+
+    def _flaky(top, btm, ref):
+        if not state["raised"]:
+            state["raised"] = True
+            raise RuntimeError("boom")
+        return real_resize(top, btm, ref)
+
+    monkeypatch.setattr(pl, "resize_pair", _flaky)
+
+    failures = []
+    with caplog.at_level(logging.INFO, logger="matrix2d.services.pipeline"):
+        results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir),
+                               reference="TOP", failures=failures)
+
+    assert len(results) > 0          # other jobs completed
+    assert len(failures) == 1
+    f = failures[0]
+    assert set(f) == {"out_name", "top_no", "btm_no", "error"}
+    assert "boom" in f["error"]
+    # Aggregate line emitted with the failed count.
+    assert any("Pipeline finished" in r.getMessage()
+               and "1 failed" in r.getMessage() for r in caplog.records)
+
+
+def test_run_pipeline_failures_none_default_unchanged(tmp_path):
+    # Passing no failures list (default None) leaves behaviour unchanged.
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir))
+    assert len(results) > 0
+
+
+def test_run_pipeline_aggregate_log_on_success(tmp_path, caplog):
+    top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
+    with caplog.at_level(logging.INFO, logger="matrix2d.services.pipeline"):
+        results = run_pipeline(str(top_dir), str(btm_dir), str(out_dir))
+    assert len(results) > 0
+    assert any("Pipeline finished" in r.getMessage()
+               and "0 failed" in r.getMessage() for r in caplog.records)
+
+
 def test_run_pipeline_progress_callback(tmp_path):
     top_dir, btm_dir, out_dir = _build_dirs(tmp_path)
     calls = []

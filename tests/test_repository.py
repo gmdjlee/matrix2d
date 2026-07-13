@@ -38,6 +38,14 @@ def test_scan_folder_skips_unparseable(tmp_path, caplog):
     assert len(metas) == 1
     assert metas[0].sample_no == 1
 
+    # Exactly one summary warning; no per-file lines, no skipped filename.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "1 valid" in msg and "1 skipped" in msg
+    assert "bad name: 1" in msg
+    assert "bad_name.dat" not in msg
+
 
 def test_scan_folder_skips_bad_content(tmp_path, caplog):
     # valid name but unparseable matrix content -> skipped, not raised
@@ -49,6 +57,25 @@ def test_scan_folder_skips_bad_content(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         metas = scan_folder(str(tmp_path), "TOP")
     assert [m.sample_no for m in metas] == [1]
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "2 skipped" in msg
+    assert "bad content: 2" in msg
+    # No skipped filename appears in the summary.
+    assert "bad_PT0002" not in msg and "empty_PT0003" not in msg
+
+
+def test_scan_folder_all_valid_no_warning(tmp_path, caplog):
+    import logging
+
+    (tmp_path / "good_PT0001_00011s(25C).dat").write_text("1,2\n3,4\n")
+    (tmp_path / "good_PT0002_00060s(240C).dat").write_text("1,2\n3,4\n")
+    with caplog.at_level(logging.WARNING):
+        metas = scan_folder(str(tmp_path), "TOP")
+    assert len(metas) == 2
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
 def test_scan_folder_skips_oversize_file(tmp_path, caplog, monkeypatch):
@@ -72,7 +99,12 @@ def test_scan_folder_skips_oversize_file(tmp_path, caplog, monkeypatch):
         metas = scan_folder(str(tmp_path), "TOP")
 
     assert [m.sample_no for m in metas] == [1]
-    assert any("too large" in rec.message for rec in caplog.records)
+    # Oversize file fails content validation -> counted as bad content in the
+    # single summary warning (no per-file "too large" line, no filename).
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "1 skipped" in msg and "bad content: 1" in msg
 
 
 def test_scan_gap_folder_gap_naming(tmp_path):

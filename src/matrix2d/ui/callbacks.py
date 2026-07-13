@@ -43,6 +43,7 @@ _COMPUTE = {
     "total": 0,
     "results": None,   # List[GapJobResult] on success
     "error": None,     # traceback string on failure
+    "failures": None,  # list of per-failed-job dicts from run_pipeline
 }
 
 # Background folder-scan state, mirroring the gap-compute pattern above. The
@@ -55,6 +56,7 @@ _SCAN = {
     "total": 0,
     "result": None,    # {"TOP": [...], "BTM": [...], "GAP": [...]} of dicts
     "errors": None,    # list of error strings
+    "skipped": None,   # {"TOP": n, ...} count of skipped files per folder
 }
 
 # Background batch-image-export state, mirroring the two patterns above. The
@@ -450,6 +452,7 @@ def register_callbacks(app):
 
         result = {"TOP": [], "BTM": [], "GAP": [], "OUT": []}
         errors = []
+        skipped = {}  # per-folder count of skipped (invalid) candidate files
         # (store key, parse kind, folder). OUT files use the gap output naming,
         # so they parse with the GAP format while staying in their own bucket.
         specs = [("TOP", "TOP", top_dir), ("BTM", "BTM", btm_dir),
@@ -463,13 +466,18 @@ def register_callbacks(app):
         try:
             grand_total = 0
             offsets = {}
+            folder_totals = {}  # key -> candidate file count (None if unknown)
             for key, _pk, folder in active:
                 offsets[key] = grand_total
                 try:
-                    grand_total += len(list_data_files(folder))
+                    n = len(list_data_files(folder))
                 except Exception:  # noqa: BLE001 - count failure -> scan reports it
                     logger.warning("Scan pre-count failed for %s folder %r",
                                    key, folder, exc_info=True)
+                    folder_totals[key] = None
+                    continue
+                folder_totals[key] = n
+                grand_total += n
             with _SCAN_LOCK:
                 _SCAN["total"] = grand_total
 
@@ -484,6 +492,9 @@ def register_callbacks(app):
                     metas = scan_folder(folder, parse_kind,
                                         progress_cb=_on_progress)
                     result[key] = [helpers.meta_to_dict(m) for m in metas]
+                    total_files = folder_totals.get(key)
+                    if total_files is not None:
+                        skipped[key] = max(0, total_files - len(metas))
                     if not metas:
                         # invalid-format files are skipped during scan, so an
                         # empty result means the folder holds no usable data.
@@ -501,6 +512,7 @@ def register_callbacks(app):
             with _SCAN_LOCK:
                 _SCAN["result"] = result
                 _SCAN["errors"] = errors
+                _SCAN["skipped"] = skipped
                 _SCAN["running"] = False
             logger.info("Scan finished: TOP=%d BTM=%d GAP=%d OUT=%d, %d error(s)",
                         len(result["TOP"]), len(result["BTM"]),
@@ -527,7 +539,7 @@ def register_callbacks(app):
                 logger.info("Scan request ignored: a scan is already running")
                 return no_update, no_update, no_update, no_update
             _SCAN.update(running=True, done=0, total=0,
-                         result=None, errors=None)
+                         result=None, errors=None, skipped=None)
         threading.Thread(
             target=_scan_worker,
             args=(top_dir, btm_dir, gap_dir, out_dir),
@@ -551,6 +563,7 @@ def register_callbacks(app):
             running = _SCAN["running"]
             done, total = _SCAN["done"], _SCAN["total"]
             result, errors = _SCAN["result"], _SCAN["errors"]
+            skipped = _SCAN["skipped"]
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
@@ -567,10 +580,14 @@ def register_callbacks(app):
 
         logger.info("Scan poll: publishing result to UI (%d error(s))",
                     len(errors or []))
-        counts = "  ".join(
-            "{k}={n}".format(k=k, n=len(result.get(k, [])))
-            for k in ("TOP", "BTM", "GAP", "OUT")
-        )
+        skipped = skipped or {}
+
+        def _count(k):
+            base = "{k}={n}".format(k=k, n=len(result.get(k, [])))
+            n_skip = skipped.get(k) or 0
+            return base + (" (skipped {0})".format(n_skip) if n_skip else "")
+
+        counts = "  ".join(_count(k) for k in ("TOP", "BTM", "GAP", "OUT"))
         status_children = [html.Span("Scanned: " + counts)]
         if errors:
             status_children.append(
@@ -966,13 +983,15 @@ def register_callbacks(app):
                     "prefix=%r", top_dir, btm_dir, out_dir, reference,
                     out_prefix)
         try:
+            failures = []  # per-failed-job dicts collected by run_pipeline
             results = run_pipeline(top_dir, btm_dir, out_dir,
                                    reference=reference,
                                    top_transform=top_cfg,
                                    btm_transform=btm_cfg,
                                    out_prefix=out_prefix,
                                    progress_cb=_on_progress,
-                                   retain_gap=False)
+                                   retain_gap=False,
+                                   failures=failures)
             # Refresh the gap cache here, in the worker, exactly once per run.
             # The poller may publish the same outcome several times (see the
             # polling-contract note above), so it must stay side-effect free.
@@ -983,7 +1002,9 @@ def register_callbacks(app):
                 helpers.register_gap(r.job.out_name, r.out_path)
             with _COMPUTE_LOCK:
                 _COMPUTE["results"] = results
-            logger.info("Gap compute finished: %d result(s)", len(results))
+                _COMPUTE["failures"] = failures
+            logger.info("Gap compute finished: %d result(s), %d failed",
+                        len(results), len(failures))
         except Exception:  # noqa: BLE001
             logger.exception("Gap compute pipeline crashed")
             with _COMPUTE_LOCK:
@@ -1017,7 +1038,7 @@ def register_callbacks(app):
                 logger.info("Compute request ignored: already running")
                 return no_update, no_update, no_update, no_update, no_update
             _COMPUTE.update(running=True, done=0, total=0,
-                            results=None, error=None)
+                            results=None, error=None, failures=None)
         top_cfg, btm_cfg = _transform_configs(transform_values)
         threading.Thread(
             target=_compute_worker,
@@ -1045,6 +1066,7 @@ def register_callbacks(app):
             running = _COMPUTE["running"]
             done, total = _COMPUTE["done"], _COMPUTE["total"]
             results, error = _COMPUTE["results"], _COMPUTE["error"]
+            failures = _COMPUTE["failures"] or []
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
@@ -1110,10 +1132,20 @@ def register_callbacks(app):
         if not summaries:
             msg = ("Computed 0 gap(s) — no pairs found or every job failed "
                    "(bad zero cell?). See the server log for per-job errors.")
-            status = html.Span(msg, className="error")
+            status = [html.Span(msg, className="error")]
         else:
-            status = html.Span(
-                "Computed {n} gap(s).".format(n=len(summaries)), className="ok")
+            status = [html.Span(
+                "Computed {n} gap(s).".format(n=len(summaries)), className="ok")]
+        # Some jobs may have failed even when others succeeded; surface a count
+        # (with up to 5 out_names) without marking the whole run as an error.
+        if failures:
+            names = [f.get("out_name", "?") for f in failures[:5]]
+            listed = ", ".join(names)
+            if len(failures) > 5:
+                listed += " …"
+            status.append(html.Div(
+                "{0}건 실패 — 로그 확인: {1}".format(len(failures), listed),
+                className="error"))
         # reset the inspect selection: out_names can be identical across runs,
         # so keeping the value would leave a chart of the previous run's data.
         return (summaries, result_opts, None,
