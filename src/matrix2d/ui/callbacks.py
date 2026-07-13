@@ -1204,28 +1204,67 @@ def register_callbacks(app):
             return _empty_fig(), _empty_fig(), \
                 "Render error: " + traceback.format_exc(limit=2)
 
-    # 4c. Effective Gap tab: AVG (± sample STD) of the combo max-gaps per
-    #     temperature point, from the last compute's store-gaps.
+    # 4c. Effective Gap tab. The chart reads ready-made records from
+    #     store-effgap-records, which is written by one of two callbacks:
+    #       - a fresh Gap Compute (store-gaps -> records), OR
+    #       - the "Load from OUT files" button (scanned OUT metas -> records).
+    #     A fresh compute overwrites any loaded data (and vice versa).
+
+    # 4c-i. Fresh compute -> records. Maps store-gaps summary dicts to
+    #       (top_no, btm_no, phase, temp_c, max_gap), skipping entries whose
+    #       gap name did not parse (no phase/temp/combo to place them). Records
+    #       are JSON-safe lists (not tuples) for the store.
+    @app.callback(
+        Output("store-effgap-records", "data"),
+        Input("store-gaps", "data"),
+        prevent_initial_call=True,
+    )
+    def effgap_records_from_gaps(store_gaps):
+        records = []
+        for s in (store_gaps or []):
+            phase, temp = s.get("phase"), s.get("temp_c")
+            top_no, btm_no = s.get("top_no"), s.get("btm_no")
+            if None in (phase, temp, top_no, btm_no):
+                continue
+            records.append([top_no, btm_no, phase, temp, s.get("max_gap")])
+        return records
+
+    # 4c-ii. Load button -> records. Builds records straight from the scanned
+    #        OUT bucket (already-computed gap files), loading each matrix via
+    #        the shared repository cache. Synchronous (batch is small enough).
+    @app.callback(
+        Output("store-effgap-records", "data", allow_duplicate=True),
+        Output("effgap-load-status", "children"),
+        Input("btn-effgap-load", "n_clicks"),
+        State("store-metas", "data"),
+        prevent_initial_call=True,
+    )
+    def load_effgap_from_out(_n, metas):
+        if not metas:
+            return no_update, "OUT 데이터 없음 — 먼저 Scan 실행"
+        out_metas = metas.get("OUT") or []
+        if not out_metas:
+            return no_update, "OUT 데이터 없음 — 먼저 Scan 실행"
+        from matrix2d.services.repository import read_matrix
+        records, skipped = helpers.effgap_records_from_metas(out_metas, read_matrix)
+        records = [list(r) for r in records]  # JSON-safe lists for the store
+        msg = "Loaded {0} OUT file(s)".format(len(records))
+        if skipped:
+            msg += " (skipped {0})".format(skipped)
+        return records, msg
+
+    # 4c-iii. Render: AVG (± sample STD) of the combo max-gaps per temperature
+    #         point, from whatever records are currently in the store.
     @app.callback(
         Output("effgap-graph", "figure"),
         Output("effgap-error", "children"),
-        [Input("store-gaps", "data")] + _option_inputs("opteff"),
+        [Input("store-effgap-records", "data")] + _option_inputs("opteff"),
         prevent_initial_call=True,
     )
-    def render_effective_gap(store_gaps, *option_values):
-        if not store_gaps:
+    def render_effective_gap(records, *option_values):
+        if not records:
             return _empty_fig("Compute gaps first"), ""
         try:
-            # (top_no, btm_no, phase, temp_c, max_gap) rows; skip entries whose
-            # gap name did not parse (no phase/temp/combo to place them).
-            records = []
-            for s in store_gaps:
-                phase, temp = s.get("phase"), s.get("temp_c")
-                top_no, btm_no = s.get("top_no"), s.get("btm_no")
-                if None in (phase, temp, top_no, btm_no):
-                    continue
-                records.append((top_no, btm_no, phase, temp, s.get("max_gap")))
-
             series = effective_gap_series(records)
             if not series:
                 return _empty_fig("No valid temperature points"), ""

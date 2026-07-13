@@ -514,6 +514,11 @@ def _tab_effgap() -> html.Div:
                  "Error bars show the sample standard deviation. Heating "
                  "points ascend, then cooling points descend.",
                  className="status"),
+        html.Div(className="field", children=[
+            html.Button("Load from OUT files", id="btn-effgap-load",
+                        n_clicks=0, className="btn"),
+            html.Div(id="effgap-load-status", className="status"),
+        ]),
         html.Div(id="effgap-error", className="error"),
         dcc.Graph(id="effgap-graph", className="graph"),
         html.Button("Save current figure to OUT as PNG", id="btn-export-effgap",
@@ -527,6 +532,9 @@ def build_layout() -> html.Div:
         # ---- stores ----
         dcc.Store(id="store-metas", data={"TOP": [], "BTM": [], "GAP": [], "OUT": []}),
         dcc.Store(id="store-gaps", data=[]),  # list of result summary dicts
+        # Effective Gap chart records (JSON-safe lists), written either from a
+        # fresh compute (store-gaps) or by loading already-computed OUT files.
+        dcc.Store(id="store-effgap-records", data=[]),
 
         # poller for the background gap compute. Lives at the root (not in the
         # Gap tab) so that leaving the tab while a compute runs cannot pause
