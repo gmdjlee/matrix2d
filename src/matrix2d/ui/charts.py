@@ -191,6 +191,10 @@ def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 
 
     The shape suffix goes on the trace name (not the title) so figures holding
     several surfaces of different shapes label each dataset individually.
+
+    ``options.zmin``/``zmax`` map the color range (cmin/cmax). When BOTH bounds
+    are set they also fix the scene z-axis range ``[zmin, zmax]``; a single
+    bound leaves the z axis on autorange (color mapping is unchanged).
     """
     arr = _as_2d_float(values)
     z = arr + z_offset
@@ -213,6 +217,9 @@ def surface_3d(values, options: ChartOptions, name: str = "", z_offset: float = 
     fig = _apply_layout(fig, options, is_3d=True)
     if options.match_aspect:
         fig.update_layout(scene=_scene_aspect(*arr.shape))
+    # apply z-axis range last so the aspect update above cannot clobber it
+    if zmin is not None and zmax is not None:
+        fig.update_scenes(zaxis_range=[zmin, zmax])
     return fig
 
 
@@ -225,6 +232,13 @@ def effective_gap_chart(series: "List[dict]", options: ChartOptions) -> go.Figur
     STD is drawn as a symmetric 'T'-shaped error bar (plotly caps the bar
     ends by default). Points with ``std is None`` (fewer than two combos)
     render without a visible cap. The y-axis is titled "Effective Gap".
+
+    Styling is a fixed black-and-white publication look: the trace line,
+    markers and error bars are solid black; both axes use dashed light-grey
+    gridlines with a solid black axis frame (mirrored on all four sides) and
+    no zero line; the plot background is white so the grey grid stays visible.
+    The y-range (zmin/zmax), y dtick, axis titles and category x-type behavior
+    are unaffected.
     """
     labels = [p["label"] for p in series]
     avg = [p["avg"] for p in series]
@@ -235,23 +249,40 @@ def effective_gap_chart(series: "List[dict]", options: ChartOptions) -> go.Figur
         x=labels,
         y=avg,
         mode="lines+markers",
-        marker=dict(size=8),
-        line=dict(width=2),
+        marker=dict(size=8, color="black"),
+        line=dict(width=2, color="black"),
         error_y=dict(type="data", array=std, visible=True,
-                     thickness=1.5, width=8),
+                     thickness=1.5, width=8, color="black"),
         name="Effective Gap",
     )
     fig = go.Figure(data=[trace])
     fig = _apply_layout(fig, options, is_3d=False, title=options.title)
 
+    # fixed black/grey publication styling shared by both axes
+    axis_style = dict(
+        gridcolor="lightgrey",
+        griddash="dash",
+        showline=True,
+        linecolor="black",
+        linewidth=1,
+        mirror=True,
+        zeroline=False,
+    )
+
     zmin, zmax = _z_bounds(options)
     y_axis = dict(title=dict(text="Effective Gap"))
+    y_axis.update(axis_style)
     if zmin is not None or zmax is not None:
         y_axis["range"] = [zmin, zmax]
     if options.y_tick_step is not None:
         y_axis["dtick"] = options.y_tick_step
     fig.update_yaxes(**y_axis)
-    fig.update_xaxes(title=dict(text="Temperature point"), type="category")
+
+    x_axis = dict(title=dict(text="Temperature point"), type="category")
+    x_axis.update(axis_style)
+    fig.update_xaxes(**x_axis)
+
+    fig.update_layout(plot_bgcolor="white")
     return fig
 
 
@@ -262,6 +293,10 @@ def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: Char
     own z (values + offset). Per-trace colorbars are positioned along the right
     edge so they do not overlap, and legend entries are enabled so surfaces can
     be toggled independently.
+
+    ``options.zmin``/``zmax`` map the color range (cmin/cmax). When BOTH bounds
+    are set they also fix the scene z-axis range ``[zmin, zmax]``; a single
+    bound leaves the z axis on autorange (color mapping is unchanged).
     """
     fig = go.Figure()
     n = len(items)
@@ -302,4 +337,7 @@ def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: Char
     fig.update_layout(legend=dict(font=dict(size=options.font_size, family=options.font_family)))
     if options.match_aspect:
         fig.update_layout(scene=_scene_aspect(max_rows, max_cols))
+    # apply z-axis range last so the aspect update above cannot clobber it
+    if zmin is not None and zmax is not None:
+        fig.update_scenes(zaxis_range=[zmin, zmax])
     return fig
