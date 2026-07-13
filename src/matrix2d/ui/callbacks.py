@@ -144,6 +144,42 @@ def _build_options(prefix, values) -> charts.ChartOptions:
     )
 
 
+def _export_image_kwargs(width, height, scale):
+    """Sanitize export size inputs into write_image kwargs (invalid/empty -> omitted).
+
+    Inputs may arrive as None, "", numbers, or junk strings and must never
+    raise. width/height coerce to a positive int; scale to a positive float.
+    Anything else (blank, zero, negative, non-numeric) is omitted so plotly
+    falls back to the figure's own layout size / scale 1.
+    """
+    kwargs = {}
+
+    def _pos_int(v):
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    def _pos_float(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f > 0 else None
+
+    w = _pos_int(width)
+    if w is not None:
+        kwargs["width"] = w
+    h = _pos_int(height)
+    if h is not None:
+        kwargs["height"] = h
+    s = _pos_float(scale)
+    if s is not None:
+        kwargs["scale"] = s
+    return kwargs
+
+
 def _option_states(prefix):
     """State() list for one tab's chart-option controls, in build order."""
     return [State("{0}-{1}".format(prefix, sfx), "value")
@@ -1174,7 +1210,7 @@ def register_callbacks(app):
     # -------------------------------------------------------------------
     # 5. Export current 2D / 3D figures to OUT as PNG (kaleido).
     # -------------------------------------------------------------------
-    def _export(fig_dict, out_dir, default_name):
+    def _export(fig_dict, out_dir, default_name, img_kwargs=None):
         # placeholder figures ("Select a sample" etc.) have no data traces
         if not fig_dict or not fig_dict.get("data"):
             return "Nothing to export."
@@ -1184,7 +1220,7 @@ def register_callbacks(app):
             os.makedirs(out_dir, exist_ok=True)
             fig = charts.go.Figure(fig_dict)
             path = os.path.join(out_dir, default_name)
-            fig.write_image(path)  # kaleido backend
+            fig.write_image(path, **(img_kwargs or {}))  # kaleido backend
             logger.info("Exported figure -> %s", path)
             return "Saved: " + path
         except Exception:  # noqa: BLE001
@@ -1197,12 +1233,16 @@ def register_callbacks(app):
         State("view2d-graph-top", "figure"),
         State("view2d-graph-btm", "figure"),
         State("folder-out", "value"),
+        State("export-img-width", "value"),
+        State("export-img-height", "value"),
+        State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_2d(_n, fig_top, fig_btm, out_dir):
+    def export_2d(_n, fig_top, fig_btm, out_dir, img_w, img_h, img_scale):
+        img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         msgs = [
-            "TOP: " + _export(fig_top, out_dir, "chart_2d_top.png"),
-            "BTM: " + _export(fig_btm, out_dir, "chart_2d_btm.png"),
+            "TOP: " + _export(fig_top, out_dir, "chart_2d_top.png", img_kwargs),
+            "BTM: " + _export(fig_btm, out_dir, "chart_2d_btm.png", img_kwargs),
         ]
         return [html.Div(m) for m in msgs]
 
@@ -1211,27 +1251,36 @@ def register_callbacks(app):
         Input("btn-export-3d", "n_clicks"),
         State("view3d-graph", "figure"),
         State("folder-out", "value"),
+        State("export-img-width", "value"),
+        State("export-img-height", "value"),
+        State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_3d(_n, fig_dict, out_dir):
-        return _export(fig_dict, out_dir, "chart_3d.png")
+    def export_3d(_n, fig_dict, out_dir, img_w, img_h, img_scale):
+        return _export(fig_dict, out_dir, "chart_3d.png",
+                       _export_image_kwargs(img_w, img_h, img_scale))
 
     @app.callback(
         Output("export-effgap-status", "children"),
         Input("btn-export-effgap", "n_clicks"),
         State("effgap-graph", "figure"),
         State("folder-out", "value"),
+        State("export-img-width", "value"),
+        State("export-img-height", "value"),
+        State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_effgap(_n, fig_dict, out_dir):
-        return _export(fig_dict, out_dir, "effective_gap.png")
+    def export_effgap(_n, fig_dict, out_dir, img_w, img_h, img_scale):
+        return _export(fig_dict, out_dir, "effective_gap.png",
+                       _export_image_kwargs(img_w, img_h, img_scale))
 
     # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
     #    Runs in a background thread (2*N kaleido renders would otherwise
     #    block the UI for large gap counts); a dcc.Interval polls the shared
     #    _EXPORT state to drive the progress bar and publish the final status,
     #    mirroring the scan/compute pattern above (same polling contract).
-    def _export_all_worker(store_gaps, out_dir, chart_type, opts):
+    def _export_all_worker(store_gaps, out_dir, chart_type, opts, img_kwargs=None):
+        img_kwargs = img_kwargs or {}
         total = len(store_gaps)
         with _EXPORT_LOCK:
             _EXPORT["total"] = total
@@ -1255,9 +1304,11 @@ def register_callbacks(app):
                             fig2d = charts.heatmap_2d(values, gap_opts)
                         else:
                             fig2d = charts.contour_2d(values, gap_opts)
-                        fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"))
+                        fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"),
+                                          **img_kwargs)
                         fig3d = charts.surface_3d(values, gap_opts, name=name)
-                        fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))
+                        fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"),
+                                          **img_kwargs)
                         saved += 2
                     except Exception as exc:  # noqa: BLE001 - keep exporting the rest
                         logger.exception("Batch image export failed for %r", name)
@@ -1288,11 +1339,15 @@ def register_callbacks(app):
         Input("btn-export-all-gaps", "n_clicks"),
         [State("store-gaps", "data"),
          State("folder-out", "value"),
-         State("gap-view-type", "value")]
+         State("gap-view-type", "value"),
+         State("export-img-width", "value"),
+         State("export-img-height", "value"),
+         State("export-img-scale", "value")]
         + _option_states("optgap"),
         prevent_initial_call=True,
     )
-    def start_export_all(_n, store_gaps, out_dir, chart_type, *option_values):
+    def start_export_all(_n, store_gaps, out_dir, chart_type,
+                         img_w, img_h, img_scale, *option_values):
         if not store_gaps:
             return (True, False,
                     "No computed gaps to export — run Compute All Gaps first.",
@@ -1300,6 +1355,7 @@ def register_callbacks(app):
         if not out_dir:
             return True, False, "Set an OUT folder first.", {"width": "0%"}, ""
         opts = _build_options("optgap", option_values)
+        img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         with _EXPORT_LOCK:
             if _EXPORT["running"]:
                 logger.info("Export-all request ignored: already running")
@@ -1308,7 +1364,7 @@ def register_callbacks(app):
                            result=None, error=None)
         threading.Thread(
             target=_export_all_worker,
-            args=(store_gaps, out_dir, chart_type, opts),
+            args=(store_gaps, out_dir, chart_type, opts, img_kwargs),
             name="export-all-worker",
             daemon=True,
         ).start()
