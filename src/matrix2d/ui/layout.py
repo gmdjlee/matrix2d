@@ -136,15 +136,29 @@ def _data_options_panel() -> html.Div:
 
 
 def _image_export_panel() -> html.Div:
-    """PNG export size controls (shared by every Save-as-PNG path).
+    """PNG export controls (shared by every Save-as-PNG path).
 
     Always visible in the sidebar (not per-tab). Blank width/height/scale keep
-    plotly's default behaviour (figure layout size, scale 1).
+    plotly's default behaviour (figure layout size, scale 1). A blank save
+    folder falls back to the OUT folder.
     """
     return html.Div(
         className="panel",
         children=[
             html.H3("Image Export"),
+            html.Div(className="field", children=[
+                html.Label("Save folder"),
+                html.Div(className="row", children=[
+                    dcc.Input(id="folder-img", type="text", value="",
+                              placeholder="blank → OUT folder",
+                              className="input-full grow"),
+                    html.Button("Browse...", id="btn-browse-img", n_clicks=0,
+                                className="btn",
+                                title="Select image save folder"),
+                    html.Button("✕", id="btn-clear-img", n_clicks=0,
+                                className="btn", title="Clear image save path"),
+                ]),
+            ]),
             html.Div(className="row", children=[
                 html.Div(className="field half", children=[
                     html.Label("Width (px)"),
@@ -371,7 +385,7 @@ def _tab_2d() -> html.Div:
             dcc.Graph(id="view2d-graph-top", className="graph half"),
             dcc.Graph(id="view2d-graph-btm", className="graph half"),
         ]),
-        html.Button("Save current figures to OUT as PNG", id="btn-export-2d",
+        html.Button("Save current figures as PNG", id="btn-export-2d",
                     n_clicks=0, className="btn"),
         html.Div(id="export2d-status", className="status"),
     ])
@@ -417,7 +431,7 @@ def _tab_3d() -> html.Div:
         html.Div(id="view3d-offsets", className="offsets"),
         html.Div(id="view3d-error", className="error"),
         dcc.Graph(id="view3d-graph", className="graph"),
-        html.Button("Save current figure to OUT as PNG", id="btn-export-3d",
+        html.Button("Save current figure as PNG", id="btn-export-3d",
                     n_clicks=0, className="btn"),
         html.Div(id="export3d-status", className="status"),
     ])
@@ -519,11 +533,19 @@ def _tab_effgap() -> html.Div:
         html.Div(className="field", children=[
             html.Button("Load from OUT files", id="btn-effgap-load",
                         n_clicks=0, className="btn"),
+            # progress bar for the background OUT load; polled by the
+            # root-level effgap-load-interval (root placement so switching
+            # tabs mid-load never pauses/unmounts the poller)
+            html.Div(className="progress-outer", children=[
+                html.Div(id="effgap-load-progress-bar",
+                         className="progress-inner"),
+            ]),
+            html.Div(id="effgap-load-progress-label", className="status"),
             html.Div(id="effgap-load-status", className="status"),
         ]),
         html.Div(id="effgap-error", className="error"),
         dcc.Graph(id="effgap-graph", className="graph"),
-        html.Button("Save current figure to OUT as PNG", id="btn-export-effgap",
+        html.Button("Save current figure as PNG", id="btn-export-effgap",
                     n_clicks=0, className="btn"),
         html.Div(id="export-effgap-status", className="status"),
     ])
@@ -546,6 +568,10 @@ def build_layout() -> html.Div:
         # poller for the background batch image export, same root-level
         # placement rationale as gap-progress-interval above.
         dcc.Interval(id="export-all-progress-interval", interval=400, disabled=True),
+
+        # poller for the background Effective-Gap OUT load, same root-level
+        # placement rationale as gap-progress-interval above.
+        dcc.Interval(id="effgap-load-interval", interval=300, disabled=True),
 
         # ---- sidebar ----
         html.Div(className="sidebar", children=[

@@ -205,6 +205,32 @@ class TestEffgapRecordsFromMetas:
         assert skipped == 0
         assert records == [(1, 12, "H", 250, 7.0)]
 
+    def test_progress_cb_called_per_meta_including_skipped(self):
+        metas = [
+            self._gap_md(1, 2, "H", 250, "a.txt"),
+            self._gap_md(1, None, "H", 250, "skip.txt"),  # skipped: no btm_no
+            self._gap_md(3, 4, "C", 25, "b.txt"),
+        ]
+        calls = []
+        records, skipped = helpers.effgap_records_from_metas(
+            metas, lambda p: np.array([[1.0]]),
+            progress_cb=lambda done, total: calls.append((done, total)))
+        assert skipped == 1
+        assert len(records) == 2
+        assert calls == [(1, 3), (2, 3), (3, 3)]
+
+    def test_progress_cb_called_on_reader_error(self):
+        def boom(_path):
+            raise ValueError("unreadable")
+
+        calls = []
+        records, skipped = helpers.effgap_records_from_metas(
+            [self._gap_md(1, 2, "H", 250, "a.txt")], boom,
+            progress_cb=lambda done, total: calls.append((done, total)))
+        assert records == []
+        assert skipped == 1
+        assert calls == [(1, 1)]
+
 
 class TestBuildTransformConfig:
     def test_identity_returns_none(self):

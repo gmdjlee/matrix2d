@@ -163,7 +163,8 @@ charts.py stays Dash-free so it ports directly to the React migration.
   the progress bar and publishes results when done (duplicate outputs use
   `allow_duplicate=True`). `run_pipeline(progress_cb=...)` reports
   (done, total) per job.
-- Polling contract (scan AND compute): the worker's outcome stays in the
+- Polling contract (scan, compute, batch export, Effective-Gap OUT load):
+  the worker's outcome stays in the
   state dict until the NEXT run starts — pollers must read it
   NON-destructively and republish every tick until the publish response
   disables the interval. dash-renderer discards responses whose
@@ -179,7 +180,16 @@ charts.py stays Dash-free so it ports directly to the React migration.
   table on the RIGHT; `.table-wrap` scrolls internally (max-height, sticky
   header) instead of the page.
 - "Save All Images (2D+3D)" exports `{out_name}_2D.png` / `_3D.png` per
-  computed gap into OUT via kaleido, using current ChartOptions.
+  computed gap via kaleido, using current ChartOptions.
+- PNG export destination (all Save-as-PNG paths, incl. batch export): the
+  Image Export panel's "Save folder" (`folder-img`, own Browse/✕ buttons);
+  blank falls back to the OUT folder (`callbacks._export_dir`).
+- Effective Gap "Load from OUT files" runs in a background thread
+  (`_EFFLOAD` state, `effgap-load-interval` poller at layout root) with a
+  two-stage progress bar: OUT folder scan, then per-file max-gap load
+  (`effgap_records_from_metas(progress_cb=...)`). A run ending without data
+  (scan error / empty folder) publishes only the status message and keeps
+  the current chart records.
 
 ## Migration plan (phase 2)
 
