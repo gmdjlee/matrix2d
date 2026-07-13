@@ -162,21 +162,25 @@ def _meta_field(meta, name):
     return getattr(meta, name, None)
 
 
-def effgap_records_from_metas(metas, reader):
+def effgap_records_from_metas(metas, reader, progress_cb=None):
     """Build (top_no, btm_no, phase, temp_c, max_gap) records from GAP/OUT metas.
 
     metas: iterable of SampleMeta (kind GAP) OR meta dicts with keys
     sample_no/btm_no/phase/temp_c/path. reader: callable(path)->ndarray.
-    Metas missing btm_no/phase/temp_c are skipped (counted). Reader errors are
-    skipped (counted). Returns (records, skipped_count).
+    progress_cb: optional callable ``progress_cb(done, total)`` invoked after
+    each meta is processed (skipped ones included). Metas missing
+    btm_no/phase/temp_c are skipped (counted). Reader errors are skipped
+    (counted). Returns (records, skipped_count).
 
     max_gap is float(np.nanmax) when the loaded matrix has any finite value,
     else None (an all-NaN matrix still emits a record). No filenames are logged
     — only counts, consistent with the scan logging policy.
     """
+    metas = list(metas)
+    total = len(metas)
     records = []
     skipped = 0
-    for meta in metas:
+    for done, meta in enumerate(metas, start=1):
         top_no = _meta_field(meta, "sample_no")
         btm_no = _meta_field(meta, "btm_no")
         phase = _meta_field(meta, "phase")
@@ -184,14 +188,17 @@ def effgap_records_from_metas(metas, reader):
         path = _meta_field(meta, "path")
         if btm_no is None or phase is None or temp_c is None:
             skipped += 1
-            continue
-        try:
-            arr = np.asarray(reader(path), dtype="float64")
-        except Exception:  # noqa: BLE001 — reader failure: skip, count only
-            skipped += 1
-            continue
-        max_gap = float(np.nanmax(arr)) if np.isfinite(arr).any() else None
-        records.append((top_no, btm_no, phase, temp_c, max_gap))
+        else:
+            try:
+                arr = np.asarray(reader(path), dtype="float64")
+            except Exception:  # noqa: BLE001 — reader failure: skip, count only
+                skipped += 1
+            else:
+                max_gap = (float(np.nanmax(arr))
+                           if np.isfinite(arr).any() else None)
+                records.append((top_no, btm_no, phase, temp_c, max_gap))
+        if progress_cb is not None:
+            progress_cb(done, total)
     return records, skipped
 
 

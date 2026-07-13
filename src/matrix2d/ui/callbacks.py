@@ -71,6 +71,21 @@ _EXPORT = {
     "error": None,     # traceback string on failure
 }
 
+# Background Effective-Gap OUT-load state, same pattern again. The "Load from
+# OUT files" button starts a worker thread (scan + per-file matrix load can be
+# slow on large OUT folders); a dcc.Interval polls this dict to drive the load
+# progress bar and publish the records once done.
+_EFFLOAD_LOCK = threading.Lock()
+_EFFLOAD = {
+    "running": False,
+    "stage": "",       # "scan" (folder scan) | "load" (per-file max-gap read)
+    "done": 0,
+    "total": 0,
+    "records": None,   # JSON-safe record lists on success (None -> no_update)
+    "result": None,    # status string once finished
+    "error": None,     # traceback string on failure
+}
+
 # Full Gap result-table rows kept server-side so the browser only ever holds
 # one page (backend pagination). Mirrors the other module caches — fine for a
 # single-user local app. Rows are the table's own columns; store-gaps carries
@@ -409,9 +424,10 @@ def register_callbacks(app):
     # -------------------------------------------------------------------
     # 0. Folder Browse... buttons -> native directory dialog. One callback
     #    per folder input; cancel / headless -> no_update. The ✕ button next
-    #    to each input clears that path (scan skips empty folders).
+    #    to each input clears that path (scan skips empty folders). "img" is
+    #    the Image Export save folder (blank -> exports fall back to OUT).
     # -------------------------------------------------------------------
-    for _kind in ("top", "btm", "gap", "out"):
+    for _kind in ("top", "btm", "gap", "out", "img"):
         @app.callback(
             Output("folder-{0}".format(_kind), "value"),
             Input("btn-browse-{0}".format(_kind), "n_clicks"),
@@ -1242,32 +1258,126 @@ def register_callbacks(app):
     # 4c-ii. Load button -> records. Scans the OUT folder itself (path from
     #        the sidebar input) so loading already-computed gap files never
     #        depends on the Scan button having run. Matrices load via the
-    #        shared repository cache. Synchronous (batch is small enough).
+    #        shared repository cache. Runs in a background thread (scan +
+    #        per-file loads block the UI on large OUT folders); the root-level
+    #        effgap-load-interval polls _EFFLOAD to drive the progress bar and
+    #        publish the records (same polling contract as scan/compute).
+    def _effgap_load_worker(out_dir):
+        from matrix2d.services.repository import read_matrix, scan_folder
+
+        def _progress(stage):
+            def cb(done, total):
+                with _EFFLOAD_LOCK:
+                    _EFFLOAD.update(stage=stage, done=done, total=total)
+            return cb
+
+        logger.info("Effective Gap OUT load started: %r", out_dir)
+        try:
+            try:
+                out_metas = scan_folder(out_dir, "GAP",
+                                        progress_cb=_progress("scan"))
+            except Exception as exc:  # noqa: BLE001 - surface any scan error
+                logger.exception("Effective Gap load: OUT scan failed for %r",
+                                 out_dir)
+                with _EFFLOAD_LOCK:
+                    _EFFLOAD["result"] = "Scan error: {0}".format(exc)
+                return
+            if not out_metas:
+                with _EFFLOAD_LOCK:
+                    _EFFLOAD["result"] = "OUT 데이터 없음 (no valid gap files)"
+                return
+            records, skipped = helpers.effgap_records_from_metas(
+                out_metas, read_matrix, progress_cb=_progress("load"))
+            msg = "Loaded {0} OUT file(s)".format(len(records))
+            if skipped:
+                msg += " (skipped {0})".format(skipped)
+            logger.info("Effective Gap OUT load finished: %d record(s), "
+                        "%d skipped", len(records), skipped)
+            with _EFFLOAD_LOCK:
+                # JSON-safe lists for the store
+                _EFFLOAD["records"] = [list(r) for r in records]
+                _EFFLOAD["result"] = msg
+        except Exception:  # noqa: BLE001 - never lose the outcome
+            logger.exception("Effective Gap OUT load worker crashed")
+            with _EFFLOAD_LOCK:
+                _EFFLOAD["error"] = traceback.format_exc(limit=3)
+        finally:
+            with _EFFLOAD_LOCK:
+                _EFFLOAD["running"] = False
+
     @app.callback(
-        Output("store-effgap-records", "data", allow_duplicate=True),
+        Output("effgap-load-interval", "disabled"),
+        Output("btn-effgap-load", "disabled"),
         Output("effgap-load-status", "children"),
+        Output("effgap-load-progress-bar", "style"),
+        Output("effgap-load-progress-label", "children"),
         Input("btn-effgap-load", "n_clicks"),
         State("folder-out", "value"),
         prevent_initial_call=True,
     )
-    def load_effgap_from_out(_n, out_dir):
+    def start_effgap_load(_n, out_dir):
         if not out_dir:
-            return no_update, "OUT 폴더를 설정하세요 (set the OUT folder first)."
-        from matrix2d.services.repository import read_matrix, scan_folder
-        try:
-            out_metas = scan_folder(out_dir, "GAP")
-        except Exception as exc:  # noqa: BLE001 - surface any scan error
-            logger.exception("Effective Gap load: OUT scan failed for %r",
-                             out_dir)
-            return no_update, "Scan error: {0}".format(exc)
-        if not out_metas:
-            return no_update, "OUT 데이터 없음 (no valid gap files)"
-        records, skipped = helpers.effgap_records_from_metas(out_metas, read_matrix)
-        records = [list(r) for r in records]  # JSON-safe lists for the store
-        msg = "Loaded {0} OUT file(s)".format(len(records))
-        if skipped:
-            msg += " (skipped {0})".format(skipped)
-        return records, msg
+            return (True, False,
+                    "OUT 폴더를 설정하세요 (set the OUT folder first).",
+                    {"width": "0%"}, "")
+        with _EFFLOAD_LOCK:
+            if _EFFLOAD["running"]:
+                logger.info("Effective Gap load request ignored: already running")
+                return no_update, no_update, no_update, no_update, no_update
+            _EFFLOAD.update(running=True, stage="scan", done=0, total=0,
+                            records=None, result=None, error=None)
+        threading.Thread(
+            target=_effgap_load_worker,
+            args=(out_dir,),
+            name="effgap-load-worker",
+            daemon=True,
+        ).start()
+        return False, True, "", {"width": "0%"}, "Loading..."
+
+    @app.callback(
+        Output("store-effgap-records", "data", allow_duplicate=True),
+        Output("effgap-load-status", "children", allow_duplicate=True),
+        Output("effgap-load-interval", "disabled", allow_duplicate=True),
+        Output("btn-effgap-load", "disabled", allow_duplicate=True),
+        Output("effgap-load-progress-bar", "style", allow_duplicate=True),
+        Output("effgap-load-progress-label", "children", allow_duplicate=True),
+        Input("effgap-load-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def poll_effgap_load(_n):
+        with _EFFLOAD_LOCK:
+            running = _EFFLOAD["running"]
+            stage = _EFFLOAD["stage"]
+            done, total = _EFFLOAD["done"], _EFFLOAD["total"]
+            records = _EFFLOAD["records"]
+            result, error = _EFFLOAD["result"], _EFFLOAD["error"]
+
+        pct = (100.0 * done / total) if total else 0.0
+        bar = {"width": "{0:.0f}%".format(pct)}
+        stage_label = ("Scanning OUT folder" if stage == "scan"
+                       else "Loading gap files")
+        label = ("{0}... {1} / {2}".format(stage_label, done, total) if total
+                 else "Loading...")
+
+        if running:
+            return no_update, no_update, no_update, no_update, bar, label
+
+        if error is not None:
+            logger.error("Effective Gap load poll: publishing error to UI:\n%s",
+                         error)
+            return (no_update, "Load error: " + error, True, False,
+                    bar, "Failed")
+        if result is None:
+            # no outcome pending (e.g. a tick right after a fresh page load)
+            logger.debug("Effective Gap load poll: no pending outcome, "
+                         "disabling interval")
+            return no_update, no_update, True, False, no_update, no_update
+        logger.info("Effective Gap load poll: publishing result to UI")
+        # records is None when the run ended without data (scan error / empty
+        # folder) — keep whatever the chart is currently showing.
+        return (records if records is not None else no_update,
+                result, True, False, {"width": "100%"},
+                "{0} / {0} — done".format(total) if records is not None else "")
 
     # 4c-iii. Render: AVG (± sample STD) of the combo max-gaps per temperature
     #         point, from whatever records are currently in the store.
@@ -1295,14 +1405,18 @@ def register_callbacks(app):
             return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
-    # 5. Export current 2D / 3D figures to OUT as PNG (kaleido).
+    # 5. Export current 2D / 3D figures as PNG (kaleido). Destination is the
+    #    Image Export "Save folder" (sidebar); blank falls back to OUT.
     # -------------------------------------------------------------------
+    def _export_dir(img_dir, out_dir):
+        return (img_dir or "").strip() or out_dir
+
     def _export(fig_dict, out_dir, default_name, img_kwargs=None):
         # placeholder figures ("Select a sample" etc.) have no data traces
         if not fig_dict or not fig_dict.get("data"):
             return "Nothing to export."
         if not out_dir:
-            return "Set an OUT folder first."
+            return "Set an image save folder (or the OUT folder) first."
         try:
             os.makedirs(out_dir, exist_ok=True)
             fig = charts.go.Figure(fig_dict)
@@ -1319,17 +1433,20 @@ def register_callbacks(app):
         Input("btn-export-2d", "n_clicks"),
         State("view2d-graph-top", "figure"),
         State("view2d-graph-btm", "figure"),
+        State("folder-img", "value"),
         State("folder-out", "value"),
         State("export-img-width", "value"),
         State("export-img-height", "value"),
         State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_2d(_n, fig_top, fig_btm, out_dir, img_w, img_h, img_scale):
+    def export_2d(_n, fig_top, fig_btm, img_dir, out_dir,
+                  img_w, img_h, img_scale):
+        dest = _export_dir(img_dir, out_dir)
         img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         msgs = [
-            "TOP: " + _export(fig_top, out_dir, "chart_2d_top.png", img_kwargs),
-            "BTM: " + _export(fig_btm, out_dir, "chart_2d_btm.png", img_kwargs),
+            "TOP: " + _export(fig_top, dest, "chart_2d_top.png", img_kwargs),
+            "BTM: " + _export(fig_btm, dest, "chart_2d_btm.png", img_kwargs),
         ]
         return [html.Div(m) for m in msgs]
 
@@ -1337,28 +1454,31 @@ def register_callbacks(app):
         Output("export3d-status", "children"),
         Input("btn-export-3d", "n_clicks"),
         State("view3d-graph", "figure"),
+        State("folder-img", "value"),
         State("folder-out", "value"),
         State("export-img-width", "value"),
         State("export-img-height", "value"),
         State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_3d(_n, fig_dict, out_dir, img_w, img_h, img_scale):
-        return _export(fig_dict, out_dir, "chart_3d.png",
+    def export_3d(_n, fig_dict, img_dir, out_dir, img_w, img_h, img_scale):
+        return _export(fig_dict, _export_dir(img_dir, out_dir), "chart_3d.png",
                        _export_image_kwargs(img_w, img_h, img_scale))
 
     @app.callback(
         Output("export-effgap-status", "children"),
         Input("btn-export-effgap", "n_clicks"),
         State("effgap-graph", "figure"),
+        State("folder-img", "value"),
         State("folder-out", "value"),
         State("export-img-width", "value"),
         State("export-img-height", "value"),
         State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_effgap(_n, fig_dict, out_dir, img_w, img_h, img_scale):
-        return _export(fig_dict, out_dir, "effective_gap.png",
+    def export_effgap(_n, fig_dict, img_dir, out_dir, img_w, img_h, img_scale):
+        return _export(fig_dict, _export_dir(img_dir, out_dir),
+                       "effective_gap.png",
                        _export_image_kwargs(img_w, img_h, img_scale))
 
     # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
@@ -1425,6 +1545,7 @@ def register_callbacks(app):
         Output("export-all-progress-label", "children"),
         Input("btn-export-all-gaps", "n_clicks"),
         [State("store-gaps", "data"),
+         State("folder-img", "value"),
          State("folder-out", "value"),
          State("gap-view-type", "value"),
          State("export-img-width", "value"),
@@ -1433,14 +1554,17 @@ def register_callbacks(app):
         + _option_states("optgap"),
         prevent_initial_call=True,
     )
-    def start_export_all(_n, store_gaps, out_dir, chart_type,
+    def start_export_all(_n, store_gaps, img_dir, out_dir, chart_type,
                          img_w, img_h, img_scale, *option_values):
         if not store_gaps:
             return (True, False,
                     "No computed gaps to export — run Compute All Gaps first.",
                     {"width": "0%"}, "")
+        out_dir = _export_dir(img_dir, out_dir)
         if not out_dir:
-            return True, False, "Set an OUT folder first.", {"width": "0%"}, ""
+            return (True, False,
+                    "Set an image save folder (or the OUT folder) first.",
+                    {"width": "0%"}, "")
         opts = _build_options("optgap", option_values)
         img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         with _EXPORT_LOCK:
