@@ -251,6 +251,7 @@ def run_pipeline(
     out_prefix: str = DEFAULT_GAP_PREFIX,
     progress_cb: "Optional[Callable[[int, int], None]]" = None,
     retain_gap: bool = True,
+    failures: "Optional[List[dict]]" = None,
 ) -> "List[GapJobResult]":
     """Run the full gap pipeline over two folders of measurements.
 
@@ -261,8 +262,9 @@ def run_pipeline(
     union of each side's center-fit/cropped blank), computes the gap, and
     writes it to ``out_dir`` under the job's output name.
 
-    Errors in a single job (including transform errors such as a blank/NaN
-    zero cell) are logged and collected; they do not abort other jobs.
+    Any error in a single job (including transform errors such as a blank/NaN
+    zero cell) is logged and, when a ``failures`` list is supplied, recorded;
+    no job error aborts the rest of the batch.
 
     Args:
         top_dir: Folder of TOP measurements.
@@ -285,6 +287,12 @@ def run_pipeline(
             result.offset/contact_index kept) so a large batch does not
             accumulate every gap in memory. The gap file on disk is written
             regardless.
+        failures: optional list to collect per-failed-job dicts. When a list
+            is passed, each job that raises appends
+            ``{"out_name", "top_no", "btm_no", "error"}`` (error = str(exc)).
+            Default None leaves behaviour unchanged for existing callers.
+            Every job exception is caught (not only ValueError/OSError) so no
+            single job can abort the batch.
 
     Returns:
         A list of GapJobResult for the successful jobs.
@@ -368,7 +376,7 @@ def run_pipeline(
                 GapJobResult(job=job, result=kept, out_path=out_path,
                              max_gap=max_gap)
             )
-        except (ValueError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - no single job aborts the batch
             logger.error(
                 "Job failed (TOP%s vs BTM%s, %s): %s",
                 job.top.sample_no,
@@ -376,9 +384,23 @@ def run_pipeline(
                 job.out_name,
                 exc,
             )
+            if failures is not None:
+                failures.append({
+                    "out_name": job.out_name,
+                    "top_no": job.top.sample_no,
+                    "btm_no": job.btm.sample_no,
+                    "error": str(exc),
+                })
         finally:
             if progress_cb is not None:
                 progress_cb(done, len(jobs))
+
+    # One aggregate line summarizing the whole batch (warning if any failed).
+    n_ok = len(results)
+    n_failed = len(jobs) - n_ok
+    _log = logger.warning if n_failed else logger.info
+    _log("Pipeline finished: %d ok, %d failed (of %d jobs)",
+         n_ok, n_failed, len(jobs))
 
     # Write the max-gap summary (prefix.txt): temp points x TOP-BTM combos.
     # A summary failure must never sink an otherwise-successful batch.

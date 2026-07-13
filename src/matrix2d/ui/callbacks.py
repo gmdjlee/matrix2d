@@ -43,6 +43,7 @@ _COMPUTE = {
     "total": 0,
     "results": None,   # List[GapJobResult] on success
     "error": None,     # traceback string on failure
+    "failures": None,  # list of per-failed-job dicts from run_pipeline
 }
 
 # Background folder-scan state, mirroring the gap-compute pattern above. The
@@ -55,6 +56,7 @@ _SCAN = {
     "total": 0,
     "result": None,    # {"TOP": [...], "BTM": [...], "GAP": [...]} of dicts
     "errors": None,    # list of error strings
+    "skipped": None,   # {"TOP": n, ...} count of skipped files per folder
 }
 
 # Background batch-image-export state, mirroring the two patterns above. The
@@ -142,6 +144,42 @@ def _build_options(prefix, values) -> charts.ChartOptions:
         width=_int(d.get("width")),
         height=_int(d.get("height")),
     )
+
+
+def _export_image_kwargs(width, height, scale):
+    """Sanitize export size inputs into write_image kwargs (invalid/empty -> omitted).
+
+    Inputs may arrive as None, "", numbers, or junk strings and must never
+    raise. width/height coerce to a positive int; scale to a positive float.
+    Anything else (blank, zero, negative, non-numeric) is omitted so plotly
+    falls back to the figure's own layout size / scale 1.
+    """
+    kwargs = {}
+
+    def _pos_int(v):
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    def _pos_float(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f > 0 else None
+
+    w = _pos_int(width)
+    if w is not None:
+        kwargs["width"] = w
+    h = _pos_int(height)
+    if h is not None:
+        kwargs["height"] = h
+    s = _pos_float(scale)
+    if s is not None:
+        kwargs["scale"] = s
+    return kwargs
 
 
 def _option_states(prefix):
@@ -414,6 +452,7 @@ def register_callbacks(app):
 
         result = {"TOP": [], "BTM": [], "GAP": [], "OUT": []}
         errors = []
+        skipped = {}  # per-folder count of skipped (invalid) candidate files
         # (store key, parse kind, folder). OUT files use the gap output naming,
         # so they parse with the GAP format while staying in their own bucket.
         specs = [("TOP", "TOP", top_dir), ("BTM", "BTM", btm_dir),
@@ -427,13 +466,18 @@ def register_callbacks(app):
         try:
             grand_total = 0
             offsets = {}
+            folder_totals = {}  # key -> candidate file count (None if unknown)
             for key, _pk, folder in active:
                 offsets[key] = grand_total
                 try:
-                    grand_total += len(list_data_files(folder))
+                    n = len(list_data_files(folder))
                 except Exception:  # noqa: BLE001 - count failure -> scan reports it
                     logger.warning("Scan pre-count failed for %s folder %r",
                                    key, folder, exc_info=True)
+                    folder_totals[key] = None
+                    continue
+                folder_totals[key] = n
+                grand_total += n
             with _SCAN_LOCK:
                 _SCAN["total"] = grand_total
 
@@ -448,6 +492,9 @@ def register_callbacks(app):
                     metas = scan_folder(folder, parse_kind,
                                         progress_cb=_on_progress)
                     result[key] = [helpers.meta_to_dict(m) for m in metas]
+                    total_files = folder_totals.get(key)
+                    if total_files is not None:
+                        skipped[key] = max(0, total_files - len(metas))
                     if not metas:
                         # invalid-format files are skipped during scan, so an
                         # empty result means the folder holds no usable data.
@@ -465,6 +512,7 @@ def register_callbacks(app):
             with _SCAN_LOCK:
                 _SCAN["result"] = result
                 _SCAN["errors"] = errors
+                _SCAN["skipped"] = skipped
                 _SCAN["running"] = False
             logger.info("Scan finished: TOP=%d BTM=%d GAP=%d OUT=%d, %d error(s)",
                         len(result["TOP"]), len(result["BTM"]),
@@ -491,7 +539,7 @@ def register_callbacks(app):
                 logger.info("Scan request ignored: a scan is already running")
                 return no_update, no_update, no_update, no_update
             _SCAN.update(running=True, done=0, total=0,
-                         result=None, errors=None)
+                         result=None, errors=None, skipped=None)
         threading.Thread(
             target=_scan_worker,
             args=(top_dir, btm_dir, gap_dir, out_dir),
@@ -515,6 +563,7 @@ def register_callbacks(app):
             running = _SCAN["running"]
             done, total = _SCAN["done"], _SCAN["total"]
             result, errors = _SCAN["result"], _SCAN["errors"]
+            skipped = _SCAN["skipped"]
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
@@ -531,10 +580,14 @@ def register_callbacks(app):
 
         logger.info("Scan poll: publishing result to UI (%d error(s))",
                     len(errors or []))
-        counts = "  ".join(
-            "{k}={n}".format(k=k, n=len(result.get(k, [])))
-            for k in ("TOP", "BTM", "GAP", "OUT")
-        )
+        skipped = skipped or {}
+
+        def _count(k):
+            base = "{k}={n}".format(k=k, n=len(result.get(k, [])))
+            n_skip = skipped.get(k) or 0
+            return base + (" (skipped {0})".format(n_skip) if n_skip else "")
+
+        counts = "  ".join(_count(k) for k in ("TOP", "BTM", "GAP", "OUT"))
         status_children = [html.Span("Scanned: " + counts)]
         if errors:
             status_children.append(
@@ -930,13 +983,15 @@ def register_callbacks(app):
                     "prefix=%r", top_dir, btm_dir, out_dir, reference,
                     out_prefix)
         try:
+            failures = []  # per-failed-job dicts collected by run_pipeline
             results = run_pipeline(top_dir, btm_dir, out_dir,
                                    reference=reference,
                                    top_transform=top_cfg,
                                    btm_transform=btm_cfg,
                                    out_prefix=out_prefix,
                                    progress_cb=_on_progress,
-                                   retain_gap=False)
+                                   retain_gap=False,
+                                   failures=failures)
             # Refresh the gap cache here, in the worker, exactly once per run.
             # The poller may publish the same outcome several times (see the
             # polling-contract note above), so it must stay side-effect free.
@@ -947,7 +1002,9 @@ def register_callbacks(app):
                 helpers.register_gap(r.job.out_name, r.out_path)
             with _COMPUTE_LOCK:
                 _COMPUTE["results"] = results
-            logger.info("Gap compute finished: %d result(s)", len(results))
+                _COMPUTE["failures"] = failures
+            logger.info("Gap compute finished: %d result(s), %d failed",
+                        len(results), len(failures))
         except Exception:  # noqa: BLE001
             logger.exception("Gap compute pipeline crashed")
             with _COMPUTE_LOCK:
@@ -981,7 +1038,7 @@ def register_callbacks(app):
                 logger.info("Compute request ignored: already running")
                 return no_update, no_update, no_update, no_update, no_update
             _COMPUTE.update(running=True, done=0, total=0,
-                            results=None, error=None)
+                            results=None, error=None, failures=None)
         top_cfg, btm_cfg = _transform_configs(transform_values)
         threading.Thread(
             target=_compute_worker,
@@ -1009,6 +1066,7 @@ def register_callbacks(app):
             running = _COMPUTE["running"]
             done, total = _COMPUTE["done"], _COMPUTE["total"]
             results, error = _COMPUTE["results"], _COMPUTE["error"]
+            failures = _COMPUTE["failures"] or []
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
@@ -1074,10 +1132,20 @@ def register_callbacks(app):
         if not summaries:
             msg = ("Computed 0 gap(s) — no pairs found or every job failed "
                    "(bad zero cell?). See the server log for per-job errors.")
-            status = html.Span(msg, className="error")
+            status = [html.Span(msg, className="error")]
         else:
-            status = html.Span(
-                "Computed {n} gap(s).".format(n=len(summaries)), className="ok")
+            status = [html.Span(
+                "Computed {n} gap(s).".format(n=len(summaries)), className="ok")]
+        # Some jobs may have failed even when others succeeded; surface a count
+        # (with up to 5 out_names) without marking the whole run as an error.
+        if failures:
+            names = [f.get("out_name", "?") for f in failures[:5]]
+            listed = ", ".join(names)
+            if len(failures) > 5:
+                listed += " …"
+            status.append(html.Div(
+                "{0}건 실패 — 로그 확인: {1}".format(len(failures), listed),
+                className="error"))
         # reset the inspect selection: out_names can be identical across runs,
         # so keeping the value would leave a chart of the previous run's data.
         return (summaries, result_opts, None,
@@ -1136,28 +1204,67 @@ def register_callbacks(app):
             return _empty_fig(), _empty_fig(), \
                 "Render error: " + traceback.format_exc(limit=2)
 
-    # 4c. Effective Gap tab: AVG (± sample STD) of the combo max-gaps per
-    #     temperature point, from the last compute's store-gaps.
+    # 4c. Effective Gap tab. The chart reads ready-made records from
+    #     store-effgap-records, which is written by one of two callbacks:
+    #       - a fresh Gap Compute (store-gaps -> records), OR
+    #       - the "Load from OUT files" button (scanned OUT metas -> records).
+    #     A fresh compute overwrites any loaded data (and vice versa).
+
+    # 4c-i. Fresh compute -> records. Maps store-gaps summary dicts to
+    #       (top_no, btm_no, phase, temp_c, max_gap), skipping entries whose
+    #       gap name did not parse (no phase/temp/combo to place them). Records
+    #       are JSON-safe lists (not tuples) for the store.
+    @app.callback(
+        Output("store-effgap-records", "data"),
+        Input("store-gaps", "data"),
+        prevent_initial_call=True,
+    )
+    def effgap_records_from_gaps(store_gaps):
+        records = []
+        for s in (store_gaps or []):
+            phase, temp = s.get("phase"), s.get("temp_c")
+            top_no, btm_no = s.get("top_no"), s.get("btm_no")
+            if None in (phase, temp, top_no, btm_no):
+                continue
+            records.append([top_no, btm_no, phase, temp, s.get("max_gap")])
+        return records
+
+    # 4c-ii. Load button -> records. Builds records straight from the scanned
+    #        OUT bucket (already-computed gap files), loading each matrix via
+    #        the shared repository cache. Synchronous (batch is small enough).
+    @app.callback(
+        Output("store-effgap-records", "data", allow_duplicate=True),
+        Output("effgap-load-status", "children"),
+        Input("btn-effgap-load", "n_clicks"),
+        State("store-metas", "data"),
+        prevent_initial_call=True,
+    )
+    def load_effgap_from_out(_n, metas):
+        if not metas:
+            return no_update, "OUT 데이터 없음 — 먼저 Scan 실행"
+        out_metas = metas.get("OUT") or []
+        if not out_metas:
+            return no_update, "OUT 데이터 없음 — 먼저 Scan 실행"
+        from matrix2d.services.repository import read_matrix
+        records, skipped = helpers.effgap_records_from_metas(out_metas, read_matrix)
+        records = [list(r) for r in records]  # JSON-safe lists for the store
+        msg = "Loaded {0} OUT file(s)".format(len(records))
+        if skipped:
+            msg += " (skipped {0})".format(skipped)
+        return records, msg
+
+    # 4c-iii. Render: AVG (± sample STD) of the combo max-gaps per temperature
+    #         point, from whatever records are currently in the store.
     @app.callback(
         Output("effgap-graph", "figure"),
         Output("effgap-error", "children"),
-        [Input("store-gaps", "data")] + _option_inputs("opteff"),
+        [Input("store-effgap-records", "data")] + _option_inputs("opteff"),
         prevent_initial_call=True,
     )
-    def render_effective_gap(store_gaps, *option_values):
-        if not store_gaps:
+    def render_effective_gap(records, *option_values):
+        if not records:
             return _empty_fig("Compute gaps first"), ""
         try:
-            # (top_no, btm_no, phase, temp_c, max_gap) rows; skip entries whose
-            # gap name did not parse (no phase/temp/combo to place them).
-            records = []
-            for s in store_gaps:
-                phase, temp = s.get("phase"), s.get("temp_c")
-                top_no, btm_no = s.get("top_no"), s.get("btm_no")
-                if None in (phase, temp, top_no, btm_no):
-                    continue
-                records.append((top_no, btm_no, phase, temp, s.get("max_gap")))
-
             series = effective_gap_series(records)
             if not series:
                 return _empty_fig("No valid temperature points"), ""
@@ -1174,7 +1281,7 @@ def register_callbacks(app):
     # -------------------------------------------------------------------
     # 5. Export current 2D / 3D figures to OUT as PNG (kaleido).
     # -------------------------------------------------------------------
-    def _export(fig_dict, out_dir, default_name):
+    def _export(fig_dict, out_dir, default_name, img_kwargs=None):
         # placeholder figures ("Select a sample" etc.) have no data traces
         if not fig_dict or not fig_dict.get("data"):
             return "Nothing to export."
@@ -1184,7 +1291,7 @@ def register_callbacks(app):
             os.makedirs(out_dir, exist_ok=True)
             fig = charts.go.Figure(fig_dict)
             path = os.path.join(out_dir, default_name)
-            fig.write_image(path)  # kaleido backend
+            fig.write_image(path, **(img_kwargs or {}))  # kaleido backend
             logger.info("Exported figure -> %s", path)
             return "Saved: " + path
         except Exception:  # noqa: BLE001
@@ -1197,12 +1304,16 @@ def register_callbacks(app):
         State("view2d-graph-top", "figure"),
         State("view2d-graph-btm", "figure"),
         State("folder-out", "value"),
+        State("export-img-width", "value"),
+        State("export-img-height", "value"),
+        State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_2d(_n, fig_top, fig_btm, out_dir):
+    def export_2d(_n, fig_top, fig_btm, out_dir, img_w, img_h, img_scale):
+        img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         msgs = [
-            "TOP: " + _export(fig_top, out_dir, "chart_2d_top.png"),
-            "BTM: " + _export(fig_btm, out_dir, "chart_2d_btm.png"),
+            "TOP: " + _export(fig_top, out_dir, "chart_2d_top.png", img_kwargs),
+            "BTM: " + _export(fig_btm, out_dir, "chart_2d_btm.png", img_kwargs),
         ]
         return [html.Div(m) for m in msgs]
 
@@ -1211,27 +1322,36 @@ def register_callbacks(app):
         Input("btn-export-3d", "n_clicks"),
         State("view3d-graph", "figure"),
         State("folder-out", "value"),
+        State("export-img-width", "value"),
+        State("export-img-height", "value"),
+        State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_3d(_n, fig_dict, out_dir):
-        return _export(fig_dict, out_dir, "chart_3d.png")
+    def export_3d(_n, fig_dict, out_dir, img_w, img_h, img_scale):
+        return _export(fig_dict, out_dir, "chart_3d.png",
+                       _export_image_kwargs(img_w, img_h, img_scale))
 
     @app.callback(
         Output("export-effgap-status", "children"),
         Input("btn-export-effgap", "n_clicks"),
         State("effgap-graph", "figure"),
         State("folder-out", "value"),
+        State("export-img-width", "value"),
+        State("export-img-height", "value"),
+        State("export-img-scale", "value"),
         prevent_initial_call=True,
     )
-    def export_effgap(_n, fig_dict, out_dir):
-        return _export(fig_dict, out_dir, "effective_gap.png")
+    def export_effgap(_n, fig_dict, out_dir, img_w, img_h, img_scale):
+        return _export(fig_dict, out_dir, "effective_gap.png",
+                       _export_image_kwargs(img_w, img_h, img_scale))
 
     # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
     #    Runs in a background thread (2*N kaleido renders would otherwise
     #    block the UI for large gap counts); a dcc.Interval polls the shared
     #    _EXPORT state to drive the progress bar and publish the final status,
     #    mirroring the scan/compute pattern above (same polling contract).
-    def _export_all_worker(store_gaps, out_dir, chart_type, opts):
+    def _export_all_worker(store_gaps, out_dir, chart_type, opts, img_kwargs=None):
+        img_kwargs = img_kwargs or {}
         total = len(store_gaps)
         with _EXPORT_LOCK:
             _EXPORT["total"] = total
@@ -1255,9 +1375,11 @@ def register_callbacks(app):
                             fig2d = charts.heatmap_2d(values, gap_opts)
                         else:
                             fig2d = charts.contour_2d(values, gap_opts)
-                        fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"))
+                        fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"),
+                                          **img_kwargs)
                         fig3d = charts.surface_3d(values, gap_opts, name=name)
-                        fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"))
+                        fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"),
+                                          **img_kwargs)
                         saved += 2
                     except Exception as exc:  # noqa: BLE001 - keep exporting the rest
                         logger.exception("Batch image export failed for %r", name)
@@ -1288,11 +1410,15 @@ def register_callbacks(app):
         Input("btn-export-all-gaps", "n_clicks"),
         [State("store-gaps", "data"),
          State("folder-out", "value"),
-         State("gap-view-type", "value")]
+         State("gap-view-type", "value"),
+         State("export-img-width", "value"),
+         State("export-img-height", "value"),
+         State("export-img-scale", "value")]
         + _option_states("optgap"),
         prevent_initial_call=True,
     )
-    def start_export_all(_n, store_gaps, out_dir, chart_type, *option_values):
+    def start_export_all(_n, store_gaps, out_dir, chart_type,
+                         img_w, img_h, img_scale, *option_values):
         if not store_gaps:
             return (True, False,
                     "No computed gaps to export — run Compute All Gaps first.",
@@ -1300,6 +1426,7 @@ def register_callbacks(app):
         if not out_dir:
             return True, False, "Set an OUT folder first.", {"width": "0%"}, ""
         opts = _build_options("optgap", option_values)
+        img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         with _EXPORT_LOCK:
             if _EXPORT["running"]:
                 logger.info("Export-all request ignored: already running")
@@ -1308,7 +1435,7 @@ def register_callbacks(app):
                            result=None, error=None)
         threading.Thread(
             target=_export_all_worker,
-            args=(store_gaps, out_dir, chart_type, opts),
+            args=(store_gaps, out_dir, chart_type, opts, img_kwargs),
             name="export-all-worker",
             daemon=True,
         ).start()

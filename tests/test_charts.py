@@ -13,6 +13,7 @@ from matrix2d.ui.charts import (
     heatmap_2d,
     surface_3d,
     multi_surface_3d,
+    effective_gap_chart,
 )
 
 
@@ -261,3 +262,83 @@ def test_multi_surface_names_and_legend():
     names = [tr.name for tr in fig.data]
     assert names == ["top", "btm"]
     assert all(tr.showlegend for tr in fig.data)
+
+
+# ---------------------------------------------------------------------------
+# effective_gap_chart — black/grey publication styling
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def eff_series():
+    return [
+        {"label": "H25", "avg": 1.0, "std": 0.2},
+        {"label": "H50", "avg": 2.0, "std": 0.4},
+        {"label": "C50", "avg": 1.5, "std": None},
+    ]
+
+
+def test_effective_gap_black_trace(eff_series):
+    fig = effective_gap_chart(eff_series, ChartOptions())
+    tr = fig.data[0]
+    assert tr.line.color == "black"
+    assert tr.marker.color == "black"
+    assert tr.error_y.color == "black"
+    # existing error-bar params intact
+    assert tr.error_y.thickness == 1.5
+    assert tr.error_y.width == 8
+    assert tr.error_y.visible is True
+
+
+def test_effective_gap_axis_styling(eff_series):
+    fig = effective_gap_chart(eff_series, ChartOptions())
+    for axis in (fig.layout.xaxis, fig.layout.yaxis):
+        assert axis.gridcolor == "lightgrey"
+        assert axis.griddash == "dash"
+        assert axis.showline is True
+        assert axis.linecolor == "black"
+        assert axis.linewidth == 1
+        assert axis.mirror is True
+        assert axis.zeroline is False
+    assert fig.layout.plot_bgcolor == "white"
+    # category x-type and axis titles retained
+    assert fig.layout.xaxis.type == "category"
+    assert fig.layout.yaxis.title.text == "Effective Gap"
+
+
+def test_effective_gap_y_range_applied(eff_series):
+    fig = effective_gap_chart(eff_series, ChartOptions(zmin=0.0, zmax=5.0))
+    assert fig.layout.yaxis.range == (0.0, 5.0)
+
+
+# ---------------------------------------------------------------------------
+# 3D z-axis range from zmin/zmax
+# ---------------------------------------------------------------------------
+
+def test_surface_zaxis_range_both_bounds(sample):
+    fig = surface_3d(sample, ChartOptions(zmin=0.0, zmax=5.0))
+    assert fig.layout.scene.zaxis.range == (0.0, 5.0)
+    # color range still driven by the same bounds
+    assert fig.data[0].cmin == 0.0
+    assert fig.data[0].cmax == 5.0
+
+
+def test_surface_zaxis_autorange_single_bound(sample):
+    fig = surface_3d(sample, ChartOptions(zmax=5.0))
+    assert fig.layout.scene.zaxis.range is None
+    # single bound still applied to color mapping
+    assert fig.data[0].cmax == 5.0
+
+
+def test_multi_surface_zaxis_range_both_bounds(sample):
+    items = [("a", sample, 0.0), ("b", sample, 5.0)]
+    fig = multi_surface_3d(items, ChartOptions(zmin=0.0, zmax=5.0))
+    assert fig.layout.scene.zaxis.range == (0.0, 5.0)
+
+
+def test_multi_surface_zaxis_range_with_match_aspect(sample):
+    # match_aspect scene update must not clobber the z-axis range
+    items = [("a", sample, 0.0)]
+    fig = multi_surface_3d(items, ChartOptions(zmin=0.0, zmax=5.0,
+                                               match_aspect=True))
+    assert fig.layout.scene.aspectmode == "manual"
+    assert fig.layout.scene.zaxis.range == (0.0, 5.0)

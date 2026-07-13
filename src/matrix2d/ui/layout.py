@@ -133,6 +133,38 @@ def _data_options_panel() -> html.Div:
     )
 
 
+def _image_export_panel() -> html.Div:
+    """PNG export size controls (shared by every Save-as-PNG path).
+
+    Always visible in the sidebar (not per-tab). Blank width/height/scale keep
+    plotly's default behaviour (figure layout size, scale 1).
+    """
+    return html.Div(
+        className="panel",
+        children=[
+            html.H3("Image Export"),
+            html.Div(className="row", children=[
+                html.Div(className="field half", children=[
+                    html.Label("Width (px)"),
+                    _num("export-img-width", None, step=10, placeholder="auto"),
+                ]),
+                html.Div(className="field half", children=[
+                    html.Label("Height (px)"),
+                    _num("export-img-height", None, step=10, placeholder="auto"),
+                ]),
+            ]),
+            html.Div(className="field", children=[
+                html.Label("Scale"),
+                dcc.Input(id="export-img-scale", type="number", value=None,
+                          step=0.5, min=0.1, placeholder="1",
+                          className="input-full"),
+            ]),
+            html.Div("Blank fields keep the on-screen figure size.",
+                     className="status"),
+        ],
+    )
+
+
 # Chart Options are per-tab and per-chart-type: 2D View, 3D View, Gap Compute
 # and Effective Gap each own an independent control set (own id prefix
 # "opt2d"/"opt3d"/"optgap"/"opteff"). The controls shown are tailored to that
@@ -482,6 +514,11 @@ def _tab_effgap() -> html.Div:
                  "Error bars show the sample standard deviation. Heating "
                  "points ascend, then cooling points descend.",
                  className="status"),
+        html.Div(className="field", children=[
+            html.Button("Load from OUT files", id="btn-effgap-load",
+                        n_clicks=0, className="btn"),
+            html.Div(id="effgap-load-status", className="status"),
+        ]),
         html.Div(id="effgap-error", className="error"),
         dcc.Graph(id="effgap-graph", className="graph"),
         html.Button("Save current figure to OUT as PNG", id="btn-export-effgap",
@@ -495,6 +532,9 @@ def build_layout() -> html.Div:
         # ---- stores ----
         dcc.Store(id="store-metas", data={"TOP": [], "BTM": [], "GAP": [], "OUT": []}),
         dcc.Store(id="store-gaps", data=[]),  # list of result summary dicts
+        # Effective Gap chart records (JSON-safe lists), written either from a
+        # fresh compute (store-gaps) or by loading already-computed OUT files.
+        dcc.Store(id="store-effgap-records", data=[]),
 
         # poller for the background gap compute. Lives at the root (not in the
         # Gap tab) so that leaving the tab while a compute runs cannot pause
@@ -510,6 +550,7 @@ def build_layout() -> html.Div:
             html.H1("Warpage Analysis"),
             _folders_panel(),
             _data_options_panel(),
+            _image_export_panel(),
             _chart_options_stack(),
         ]),
 

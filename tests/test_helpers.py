@@ -136,6 +136,76 @@ class TestParseGapName:
         assert helpers.parse_gap_name("") is None
 
 
+class TestEffgapRecordsFromMetas:
+    def _gap_md(self, top_no, btm_no, phase, temp_c, path):
+        return {
+            "title": "T",
+            "sample_no": top_no,
+            "time_s": 0,
+            "temp_c": temp_c,
+            "kind": "GAP",
+            "path": path,
+            "btm_no": btm_no,
+            "phase": phase,
+        }
+
+    def test_valid_metas_build_records_with_max_gap(self):
+        mats = {
+            "a.txt": np.array([[0.0, 1.0], [2.0, np.nan]]),
+            "b.txt": np.array([[5.0, 3.0]]),
+        }
+        metas = [
+            self._gap_md(1, 2, "H", 250, "a.txt"),
+            self._gap_md(3, 4, "C", 25, "b.txt"),
+        ]
+        records, skipped = helpers.effgap_records_from_metas(
+            metas, lambda p: mats[p])
+        assert skipped == 0
+        assert records == [
+            (1, 2, "H", 250, 2.0),
+            (3, 4, "C", 25, 5.0),
+        ]
+
+    def test_all_nan_matrix_emits_record_with_none_max(self):
+        metas = [self._gap_md(1, 2, "H", 250, "nan.txt")]
+        records, skipped = helpers.effgap_records_from_metas(
+            metas, lambda p: np.array([[np.nan, np.nan]]))
+        assert skipped == 0
+        assert records == [(1, 2, "H", 250, None)]
+
+    def test_missing_btm_no_skipped_counted(self):
+        md = self._gap_md(1, None, "H", 250, "a.txt")
+        records, skipped = helpers.effgap_records_from_metas(
+            [md], lambda p: np.array([[1.0]]))
+        assert records == []
+        assert skipped == 1
+
+    def test_missing_phase_or_temp_skipped(self):
+        no_phase = self._gap_md(1, 2, None, 250, "a.txt")
+        no_temp = self._gap_md(1, 2, "H", None, "b.txt")
+        records, skipped = helpers.effgap_records_from_metas(
+            [no_phase, no_temp], lambda p: np.array([[1.0]]))
+        assert records == []
+        assert skipped == 2
+
+    def test_reader_error_skipped_counted(self):
+        def boom(_path):
+            raise ValueError("unreadable")
+
+        md = self._gap_md(1, 2, "H", 250, "a.txt")
+        records, skipped = helpers.effgap_records_from_metas([md], boom)
+        assert records == []
+        assert skipped == 1
+
+    def test_accepts_sample_meta_objects(self):
+        from matrix2d.core.parser import parse_gap_filename
+        meta = parse_gap_filename("TEST-H250_TOP1-BTM12.txt")
+        records, skipped = helpers.effgap_records_from_metas(
+            [meta], lambda p: np.array([[4.0, 7.0]]))
+        assert skipped == 0
+        assert records == [(1, 12, "H", 250, 7.0)]
+
+
 class TestBuildTransformConfig:
     def test_identity_returns_none(self):
         assert helpers.build_transform_config([], 0, None, None) is None

@@ -155,6 +155,46 @@ _GAP_NAME_LEGACY_RE = re.compile(
     r"^TOP(?P<top>\d+)-BTM(?P<btm>\d+)_(?P<phase>[HC])(?P<temp>\d{1,3})")
 
 
+def _meta_field(meta, name):
+    """Read ``name`` from a SampleMeta or a serialized meta dict (None if absent)."""
+    if isinstance(meta, dict):
+        return meta.get(name)
+    return getattr(meta, name, None)
+
+
+def effgap_records_from_metas(metas, reader):
+    """Build (top_no, btm_no, phase, temp_c, max_gap) records from GAP/OUT metas.
+
+    metas: iterable of SampleMeta (kind GAP) OR meta dicts with keys
+    sample_no/btm_no/phase/temp_c/path. reader: callable(path)->ndarray.
+    Metas missing btm_no/phase/temp_c are skipped (counted). Reader errors are
+    skipped (counted). Returns (records, skipped_count).
+
+    max_gap is float(np.nanmax) when the loaded matrix has any finite value,
+    else None (an all-NaN matrix still emits a record). No filenames are logged
+    — only counts, consistent with the scan logging policy.
+    """
+    records = []
+    skipped = 0
+    for meta in metas:
+        top_no = _meta_field(meta, "sample_no")
+        btm_no = _meta_field(meta, "btm_no")
+        phase = _meta_field(meta, "phase")
+        temp_c = _meta_field(meta, "temp_c")
+        path = _meta_field(meta, "path")
+        if btm_no is None or phase is None or temp_c is None:
+            skipped += 1
+            continue
+        try:
+            arr = np.asarray(reader(path), dtype="float64")
+        except Exception:  # noqa: BLE001 — reader failure: skip, count only
+            skipped += 1
+            continue
+        max_gap = float(np.nanmax(arr)) if np.isfinite(arr).any() else None
+        records.append((top_no, btm_no, phase, temp_c, max_gap))
+    return records, skipped
+
+
 def parse_gap_name(out_name: str) -> Optional[dict]:
     """Parse a gap output name like ``TEST-C25_TOP3-BTM8.txt`` (``_2`` ok).
 
