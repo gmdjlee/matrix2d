@@ -179,8 +179,16 @@ charts.py stays Dash-free so it ports directly to the React migration.
 - Gap tab layout: charts (inspect dropdown + 2D + 3D) on the LEFT, result
   table on the RIGHT; `.table-wrap` scrolls internally (max-height, sticky
   header) instead of the page.
-- "Save All Images (2D+3D)" exports `{out_name}_2D.png` / `_3D.png` per
-  computed gap via kaleido, using current ChartOptions.
+- "Save All Images" exports `{out_name}_2D.png` / `_3D.png` per computed gap
+  via kaleido, using current ChartOptions. A `export-all-kinds` checklist
+  (2D/3D, both default) picks which images; a `export-all-downsample` dropdown
+  stride-downsamples the gap grid (max shape 300/200/150/100, "Off" default)
+  for export only (no core-layer change, NaN/blank pattern preserved, shows in
+  the title's rows×cols). Rendering runs a parallel per-thread kaleido scope
+  pool (`kaleido.scopes.plotly.PlotlyScope`, one Chromium subprocess each) —
+  worker count `MATRIX2D_EXPORT_WORKERS` (default 4, clamp 1–8, capped at gap
+  count); falls back to sequential `fig.write_image` if PlotlyScope is
+  unavailable. `_EXPORT["done"]` still counts completed GAPS.
 - PNG export destination (all Save-as-PNG paths, incl. batch export): the
   Image Export panel's "Save folder" (`folder-img`, own Browse/✕ buttons);
   blank falls back to the OUT folder (`callbacks._export_dir`).

@@ -450,8 +450,26 @@ def _tab_gap() -> html.Div:
                      className="status"),
             html.Button("Compute All Gaps", id="btn-compute-gaps",
                         n_clicks=0, className="btn btn-primary"),
-            html.Button("Save All Images (2D+3D)", id="btn-export-all-gaps",
+            html.Button("Save All Images", id="btn-export-all-gaps",
                         n_clicks=0, className="btn"),
+            html.Div(className="field", children=[
+                html.Label("Images"),
+                dcc.Checklist(id="export-all-kinds",
+                              options=[{"label": "2D", "value": "2d"},
+                                       {"label": "3D", "value": "3d"}],
+                              value=["2d", "3d"], inline=True,
+                              className="checklist"),
+            ]),
+            html.Div(className="field", children=[
+                html.Label("Downsample (max grid)"),
+                dcc.Dropdown(id="export-all-downsample", clearable=False,
+                             value=0,
+                             options=[{"label": "Off (original)", "value": 0},
+                                      {"label": "≤ 300", "value": 300},
+                                      {"label": "≤ 200", "value": 200},
+                                      {"label": "≤ 150", "value": 150},
+                                      {"label": "≤ 100", "value": 100}]),
+            ]),
         ]),
         # progress bar for the background compute; polled by the root-level
         # gap-progress-interval (kept outside this tab so switching tabs

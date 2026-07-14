@@ -6,6 +6,7 @@ single-user Dash app (no concurrency concerns worth engineering for here).
 """
 
 import re
+import threading
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
@@ -296,6 +297,11 @@ _MATRIX_CACHE_MAX = 64
 _GAP_PATHS = {}          # type: Dict[str, str]  # out_name -> saved OUT file path
 _GAP_LRU = OrderedDict()  # type: "OrderedDict[str, np.ndarray]"  # bounded array cache
 _GAP_LRU_MAX = 8
+# get_gap is called concurrently by the batch-export kaleido worker pool;
+# OrderedDict move_to_end/popitem interleavings can otherwise raise KeyError
+# (entry evicted between lookup and move_to_end). File loads stay outside
+# the lock so parallel workers still read distinct OUT files concurrently.
+_GAP_LOCK = threading.Lock()
 
 
 def get_matrix(path: str) -> Optional[np.ndarray]:
@@ -333,11 +339,12 @@ def get_gap(out_name: str) -> "Optional[np.ndarray]":
     """Return the gap array for out_name, loading it from its saved OUT file
     on demand and caching the last few in a bounded LRU. Values reflect the
     saved file precision (%.2f). Returns None if unknown or unreadable."""
-    arr = _GAP_LRU.get(out_name)
-    if arr is not None:
-        _GAP_LRU.move_to_end(out_name)
-        return arr
-    path = _GAP_PATHS.get(out_name)
+    with _GAP_LOCK:
+        arr = _GAP_LRU.get(out_name)
+        if arr is not None:
+            _GAP_LRU.move_to_end(out_name)
+            return arr
+        path = _GAP_PATHS.get(out_name)
     if path is None:
         return None
     from matrix2d.core.parser import load_matrix as _load_gap_file
@@ -345,10 +352,11 @@ def get_gap(out_name: str) -> "Optional[np.ndarray]":
         arr = np.asarray(_load_gap_file(path), dtype="float64")
     except (ValueError, OSError):
         return None
-    _GAP_LRU[out_name] = arr
-    _GAP_LRU.move_to_end(out_name)
-    while len(_GAP_LRU) > _GAP_LRU_MAX:
-        _GAP_LRU.popitem(last=False)
+    with _GAP_LOCK:
+        _GAP_LRU[out_name] = arr
+        _GAP_LRU.move_to_end(out_name)
+        while len(_GAP_LRU) > _GAP_LRU_MAX:
+            _GAP_LRU.popitem(last=False)
     return arr
 
 
