@@ -8,7 +8,12 @@ Run with:  python -m pytest tests/test_callbacks_export.py
 
 import numpy as np
 
-from matrix2d.ui.callbacks import _downsample_for_export, _export_image_kwargs
+from matrix2d.ui.callbacks import (
+    _downsample_for_export,
+    _export_image_kwargs,
+    _filtered_3d_items,
+    _stem_for_key,
+)
 
 
 def test_valid_ints():
@@ -133,3 +138,74 @@ def test_downsample_non_square_within_cap_unchanged():
     # longest dim (8) already <= cap -> unchanged even though non-square
     a = np.arange(40).reshape(8, 5)
     assert _downsample_for_export(a, 8) is a
+
+
+# --- _stem_for_key ----------------------------------------------------------
+
+def test_stem_for_key_gap_strips_extension():
+    assert _stem_for_key("gap::TEST-C25_TOP3-BTM8.txt") == "TEST-C25_TOP3-BTM8"
+
+
+def test_stem_for_key_meta_windows_path_basename_stem():
+    key = "meta::C:\\data\\TOP\\part_PT0001_00192s(240C).dat"
+    assert _stem_for_key(key) == "part_PT0001_00192s(240C)"
+
+
+def test_stem_for_key_unknown_passthrough():
+    assert _stem_for_key("weird-key") == "weird-key"
+
+
+# --- _filtered_3d_items -----------------------------------------------------
+
+def test_filtered_3d_items_kind_prefix_in_filename():
+    items = _filtered_3d_items(
+        [("TOP", [{"label": "top a", "value": "meta::/x/a.dat"}])])
+    assert len(items) == 1
+    assert items[0]["filename"] == "TOP_a_3D.png"
+    assert items[0]["key"] == "meta::/x/a.dat"
+    assert items[0]["label"] == "top a"
+
+
+def test_filtered_3d_items_order_preserved_across_kinds():
+    items = _filtered_3d_items([
+        ("TOP", [{"label": "t", "value": "meta::/x/t.dat"}]),
+        ("BTM", [{"label": "b", "value": "meta::/x/b.dat"}]),
+        ("GAP", [{"label": "g", "value": "gap::g.txt"}]),
+        ("OUT", [{"label": "o", "value": "meta::/x/o.dat"}]),
+    ])
+    assert [it["filename"] for it in items] == [
+        "TOP_t_3D.png", "BTM_b_3D.png", "GAP_g_3D.png", "OUT_o_3D.png"]
+
+
+def test_filtered_3d_items_duplicate_stems_get_numeric_suffix():
+    # same kind + same stem across two folders -> _2 on the second
+    items = _filtered_3d_items([("TOP", [
+        {"label": "a", "value": "meta::/x/a.dat"},
+        {"label": "a2", "value": "meta::/y/a.dat"},
+        {"label": "a3", "value": "meta::/z/a.dat"},
+    ])])
+    assert [it["filename"] for it in items] == [
+        "TOP_a_3D.png", "TOP_a_3D_2.png", "TOP_a_3D_3.png"]
+
+
+def test_filtered_3d_items_none_and_empty_options_skipped():
+    items = _filtered_3d_items([
+        ("TOP", None),
+        ("BTM", []),
+        ("GAP", [{"label": "g", "value": "gap::g.txt"}]),
+    ])
+    assert [it["filename"] for it in items] == ["GAP_g_3D.png"]
+
+
+def test_filtered_3d_items_option_missing_value_skipped():
+    items = _filtered_3d_items([("TOP", [
+        {"label": "no value"},
+        {"label": "ok", "value": "meta::/x/ok.dat"},
+    ])])
+    assert [it["filename"] for it in items] == ["TOP_ok_3D.png"]
+
+
+def test_filtered_3d_items_label_falls_back_to_key():
+    items = _filtered_3d_items(
+        [("GAP", [{"value": "gap::g.txt"}])])
+    assert items[0]["label"] == "gap::g.txt"

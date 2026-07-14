@@ -3,6 +3,7 @@
 import glob
 import logging
 import os
+import threading
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
@@ -23,6 +24,12 @@ _RAW_CACHE = (
 )  # type: OrderedDict[str, Tuple[Tuple[int, int], np.ndarray]]
 
 _RAW_CACHE_DEFAULT = 128
+
+# read_matrix is reached from load_data on the parallel batch-export kaleido
+# workers, so _RAW_CACHE dict ops are lock-guarded (same reasoning as
+# helpers._GAP_LOCK). The file parse (load_matrix) stays OUTSIDE the lock so
+# distinct files still load concurrently; a rare duplicate load is acceptable.
+_RAW_CACHE_LOCK = threading.Lock()
 
 
 def _raw_cache_max() -> int:
@@ -67,17 +74,20 @@ def read_matrix(path: str) -> np.ndarray:
     st = os.stat(path)
     stat_key = (st.st_mtime_ns, st.st_size)
 
-    cached = _RAW_CACHE.get(path)
-    if cached is not None and cached[0] == stat_key:
-        _RAW_CACHE.move_to_end(path)
-        return cached[1]
+    with _RAW_CACHE_LOCK:
+        cached = _RAW_CACHE.get(path)
+        if cached is not None and cached[0] == stat_key:
+            _RAW_CACHE.move_to_end(path)
+            return cached[1]
 
-    arr = load_matrix(path)
-    _RAW_CACHE[path] = (stat_key, arr)
-    _RAW_CACHE.move_to_end(path)
-    max_size = _raw_cache_max()
-    while len(_RAW_CACHE) > max_size:
-        _RAW_CACHE.popitem(last=False)
+    arr = load_matrix(path)  # parse outside the lock (concurrent distinct files)
+
+    with _RAW_CACHE_LOCK:
+        _RAW_CACHE[path] = (stat_key, arr)
+        _RAW_CACHE.move_to_end(path)
+        max_size = _raw_cache_max()
+        while len(_RAW_CACHE) > max_size:
+            _RAW_CACHE.popitem(last=False)
     return arr
 
 

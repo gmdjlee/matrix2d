@@ -434,6 +434,20 @@ def _tab_3d() -> html.Div:
         html.Button("Save current figure as PNG", id="btn-export-3d",
                     n_clicks=0, className="btn"),
         html.Div(id="export3d-status", className="status"),
+        html.Button("Save All Filtered Images", id="btn-export-3d-all",
+                    n_clicks=0, className="btn"),
+        html.Div("Saves one 3D surface PNG per dataset listed in the filtered "
+                 "TOP/BTM/GAP/OUT dropdowns (options, not selections).",
+                 className="status"),
+        # progress bar for the background 3D batch image export; polled by the
+        # root-level export3d-all-progress-interval (same reasoning as the Gap
+        # tab's batch export: kept outside the tab so switching tabs mid-export
+        # does not unmount the poller)
+        html.Div(className="progress-outer", children=[
+            html.Div(id="export3d-all-progress-bar", className="progress-inner"),
+        ]),
+        html.Div(id="export3d-all-progress-label", className="status"),
+        html.Div(id="export3d-all-status", className="status"),
     ])
 
 
@@ -586,6 +600,10 @@ def build_layout() -> html.Div:
         # poller for the background batch image export, same root-level
         # placement rationale as gap-progress-interval above.
         dcc.Interval(id="export-all-progress-interval", interval=400, disabled=True),
+
+        # poller for the background 3D-tab batch image export, same root-level
+        # placement rationale as gap-progress-interval above.
+        dcc.Interval(id="export3d-all-progress-interval", interval=400, disabled=True),
 
         # poller for the background Effective-Gap OUT load, same root-level
         # placement rationale as gap-progress-interval above.
