@@ -1,11 +1,14 @@
-"""Unit tests for _export_image_kwargs in matrix2d.ui.callbacks.
+"""Unit tests for _export_image_kwargs / _downsample_for_export in
+matrix2d.ui.callbacks.
 
 Importing callbacks does not require a running Dash app (the module only
-defines callback factories), so the helper can be exercised in isolation.
+defines callback factories), so the helpers can be exercised in isolation.
 Run with:  python -m pytest tests/test_callbacks_export.py
 """
 
-from matrix2d.ui.callbacks import _export_image_kwargs
+import numpy as np
+
+from matrix2d.ui.callbacks import _downsample_for_export, _export_image_kwargs
 
 
 def test_valid_ints():
@@ -65,3 +68,68 @@ def test_mixed_zero_and_valid():
 def test_never_raises_on_odd_types():
     # objects that are neither None/str/number must be swallowed, not raised
     assert _export_image_kwargs([1], {"x": 1}, object()) == {}
+
+
+# --- _downsample_for_export -------------------------------------------------
+
+def test_downsample_cap_zero_returns_same_array():
+    a = np.arange(100).reshape(10, 10)
+    assert _downsample_for_export(a, 0) is a
+
+
+def test_downsample_cap_none_returns_same_array():
+    a = np.arange(100).reshape(10, 10)
+    assert _downsample_for_export(a, None) is a
+
+
+def test_downsample_negative_cap_returns_same_array():
+    a = np.arange(100).reshape(10, 10)
+    assert _downsample_for_export(a, -5) is a
+
+
+def test_downsample_cap_ge_max_shape_unchanged():
+    a = np.arange(100).reshape(10, 10)
+    assert _downsample_for_export(a, 10) is a
+    assert _downsample_for_export(a, 50) is a
+
+
+def test_downsample_exact_division_stride():
+    # shape (10, 10), cap 5 -> k = ceil(10/5) = 2 -> shape (5, 5)
+    a = np.arange(100).reshape(10, 10)
+    out = _downsample_for_export(a, 5)
+    assert out.shape == (5, 5)
+    # stride-2 selection, not interpolation
+    np.testing.assert_array_equal(out, a[::2, ::2])
+
+
+def test_downsample_ceil_case():
+    # shape (10, 4), cap 3 -> k = ceil(10/3) = 4 -> rows [0,4,8], cols [0]
+    a = np.arange(40).reshape(10, 4)
+    out = _downsample_for_export(a, 3)
+    assert out.shape == (3, 1)
+    np.testing.assert_array_equal(out, a[::4, ::4])
+
+
+def test_downsample_preserves_nan_cells():
+    a = np.arange(64, dtype="float64").reshape(8, 8)
+    a[0, 0] = np.nan
+    a[4, 4] = np.nan
+    out = _downsample_for_export(a, 4)  # k = ceil(8/4) = 2
+    assert out.shape == (4, 4)
+    assert np.isnan(out[0, 0])   # a[0, 0]
+    assert np.isnan(out[2, 2])   # a[4, 4]
+    assert not np.isnan(out[1, 1])
+
+
+def test_downsample_non_square_only_one_dim_exceeds():
+    # shape (20, 5), cap 10 -> longest=20 -> k = ceil(20/10) = 2
+    a = np.arange(100).reshape(20, 5)
+    out = _downsample_for_export(a, 10)
+    assert out.shape == (10, 3)  # rows 20->10, cols 5->ceil(5/2)=3
+    np.testing.assert_array_equal(out, a[::2, ::2])
+
+
+def test_downsample_non_square_within_cap_unchanged():
+    # longest dim (8) already <= cap -> unchanged even though non-square
+    a = np.arange(40).reshape(8, 5)
+    assert _downsample_for_export(a, 8) is a

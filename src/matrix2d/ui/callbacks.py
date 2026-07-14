@@ -16,6 +16,7 @@ Dataset selection model:
 import dataclasses
 import logging
 import os
+import queue
 import threading
 import traceback
 from typing import List, Optional
@@ -195,6 +196,23 @@ def _export_image_kwargs(width, height, scale):
     if s is not None:
         kwargs["scale"] = s
     return kwargs
+
+
+def _downsample_for_export(values, cap):
+    """Stride-downsample a 2D array so max(shape) <= cap (0/None = off).
+
+    Striding (not interpolation) so the NaN/blank pattern is preserved and no
+    core-layer semantics change: cap falsy or <= 0 returns the array unchanged;
+    an array already within the cap is unchanged; otherwise a stride
+    ``k = ceil(max(shape) / cap)`` is applied to both axes.
+    """
+    if not cap or cap <= 0:
+        return values
+    longest = max(values.shape)
+    if longest <= cap:
+        return values
+    k = -(-longest // cap)  # ceil(longest / cap)
+    return values[::k, ::k]
 
 
 def _option_states(prefix):
@@ -1486,47 +1504,144 @@ def register_callbacks(app):
     #    block the UI for large gap counts); a dcc.Interval polls the shared
     #    _EXPORT state to drive the progress bar and publish the final status,
     #    mirroring the scan/compute pattern above (same polling contract).
-    def _export_all_worker(store_gaps, out_dir, chart_type, opts, img_kwargs=None):
+    def _export_worker_count(n_gaps):
+        """Kaleido worker count: MATRIX2D_EXPORT_WORKERS (default 4), clamped
+        to [1, 8] and capped at the number of gaps (never spawn idle scopes)."""
+        try:
+            n = int(os.environ.get("MATRIX2D_EXPORT_WORKERS", "4"))
+        except (TypeError, ValueError):
+            n = 4
+        n = max(1, min(8, n))
+        return max(1, min(n, n_gaps))
+
+    def _build_gap_figs(values, name, opts, chart_type, kinds, downsample):
+        """Build the requested (kind, path-stem-suffix, figure) list for one gap.
+
+        Pure figure construction (no I/O) so it is safe to run per worker.
+        """
+        values = _downsample_for_export(values, downsample)
+        gap_opts = dataclasses.replace(opts, title=opts.title or "GAP " + name)
+        figs = []
+        if "2d" in kinds:
+            if chart_type == "heatmap":
+                fig2d = charts.heatmap_2d(values, gap_opts)
+            else:
+                fig2d = charts.contour_2d(values, gap_opts)
+            figs.append(("_2D.png", fig2d))
+        if "3d" in kinds:
+            figs.append(("_3D.png", charts.surface_3d(values, gap_opts, name=name)))
+        return figs
+
+    def _export_all_worker(store_gaps, out_dir, chart_type, opts,
+                           img_kwargs=None, kinds=None, downsample=0):
         img_kwargs = img_kwargs or {}
+        kinds = kinds or ["2d", "3d"]
         total = len(store_gaps)
         with _EXPORT_LOCK:
             _EXPORT["total"] = total
-        logger.info("Batch image export started: %d gap(s) -> %r",
-                    total, out_dir)
+        logger.info("Batch image export started: %d gap(s) -> %r (kinds=%s, "
+                    "downsample=%s)", total, out_dir, kinds, downsample)
         try:
             os.makedirs(out_dir, exist_ok=True)
-            saved = 0
-            failed = []
-            for i, s in enumerate(store_gaps):
+
+            # Shared, lock-guarded progress/result state across kaleido workers.
+            pool_lock = threading.Lock()
+            counters = {"done": 0, "saved": 0}
+            failed = []  # list of (index, message), sorted by index at the end
+
+            def _render_one(scope, i, s):
+                """Render+write one gap's images. scope=None -> sequential
+                fig.write_image fallback. Returns images written for this gap."""
                 name = s.get("out_name", "")
                 values = helpers.get_gap(name)
                 if values is None:
-                    failed.append(name + " (not in cache)")
-                else:
-                    stem = os.path.splitext(name)[0]
-                    gap_opts = dataclasses.replace(
-                        opts, title=opts.title or "GAP " + name)
-                    try:
-                        if chart_type == "heatmap":
-                            fig2d = charts.heatmap_2d(values, gap_opts)
+                    with pool_lock:
+                        failed.append((i, name + " (not in cache)"))
+                    return 0
+                stem = os.path.splitext(name)[0]
+                written = 0
+                try:
+                    for suffix, fig in _build_gap_figs(
+                            values, name, opts, chart_type, kinds, downsample):
+                        path = os.path.join(out_dir, stem + suffix)
+                        if scope is None:
+                            fig.write_image(path, **img_kwargs)
                         else:
-                            fig2d = charts.contour_2d(values, gap_opts)
-                        fig2d.write_image(os.path.join(out_dir, stem + "_2D.png"),
-                                          **img_kwargs)
-                        fig3d = charts.surface_3d(values, gap_opts, name=name)
-                        fig3d.write_image(os.path.join(out_dir, stem + "_3D.png"),
-                                          **img_kwargs)
-                        saved += 2
-                    except Exception as exc:  # noqa: BLE001 - keep exporting the rest
-                        logger.exception("Batch image export failed for %r", name)
-                        failed.append("{0} ({1})".format(name, exc))
+                            png = scope.transform(fig, format="png", **img_kwargs)
+                            with open(path, "wb") as fh:
+                                fh.write(png)
+                        written += 1
+                except Exception as exc:  # noqa: BLE001 - keep exporting the rest
+                    logger.exception("Batch image export failed for %r", name)
+                    with pool_lock:
+                        failed.append((i, "{0} ({1})".format(name, exc)))
+                return written
+
+            def _finish_gap(written):
+                with pool_lock:
+                    counters["done"] += 1
+                    counters["saved"] += written
+                    done = counters["done"]
                 with _EXPORT_LOCK:
-                    _EXPORT["done"] = i + 1
+                    _EXPORT["done"] = done
+
+            # Prefer parallel per-thread PlotlyScope instances (each = its own
+            # Chromium subprocess); fall back to sequential fig.write_image if
+            # kaleido's low-level scope API is unavailable.
+            try:
+                from kaleido.scopes.plotly import PlotlyScope
+            except ImportError:
+                PlotlyScope = None
+
+            if PlotlyScope is None:
+                logger.info("PlotlyScope unavailable; sequential export fallback")
+                for i, s in enumerate(store_gaps):
+                    _finish_gap(_render_one(None, i, s))
+            else:
+                work = queue.Queue()
+                for item in enumerate(store_gaps):
+                    work.put(item)
+                n_workers = _export_worker_count(total)
+                logger.info("Batch image export: %d kaleido worker(s)", n_workers)
+
+                def _pool_worker():
+                    scope = PlotlyScope()
+                    try:
+                        while True:
+                            try:
+                                i, s = work.get_nowait()
+                            except queue.Empty:
+                                break
+                            try:
+                                _finish_gap(_render_one(scope, i, s))
+                            except Exception:  # noqa: BLE001 - never die silently
+                                logger.exception(
+                                    "Export pool worker item crashed")
+                                with pool_lock:
+                                    failed.append((i, "unexpected worker error"))
+                                _finish_gap(0)
+                    finally:
+                        try:
+                            scope._shutdown_kaleido()
+                        except Exception:  # noqa: BLE001 - best-effort cleanup
+                            logger.exception("kaleido scope shutdown failed")
+
+                threads = [threading.Thread(target=_pool_worker,
+                                            name="export-pool-%d" % w,
+                                            daemon=True)
+                           for w in range(n_workers)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+            saved = counters["saved"]
+            failed_msgs = [m for _, m in sorted(failed, key=lambda x: x[0])]
             msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
             logger.info("Batch image export finished: %d saved, %d failed -> %s",
-                        saved, len(failed), out_dir)
-            if failed:
-                msg += " Failed: " + ", ".join(failed)
+                        saved, len(failed_msgs), out_dir)
+            if failed_msgs:
+                msg += " Failed: " + ", ".join(failed_msgs)
             with _EXPORT_LOCK:
                 _EXPORT["result"] = msg
         except Exception:  # noqa: BLE001 - never lose the outcome
@@ -1548,6 +1663,8 @@ def register_callbacks(app):
          State("folder-img", "value"),
          State("folder-out", "value"),
          State("gap-view-type", "value"),
+         State("export-all-kinds", "value"),
+         State("export-all-downsample", "value"),
          State("export-img-width", "value"),
          State("export-img-height", "value"),
          State("export-img-scale", "value")]
@@ -1555,16 +1672,26 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def start_export_all(_n, store_gaps, img_dir, out_dir, chart_type,
-                         img_w, img_h, img_scale, *option_values):
+                         kinds, downsample, img_w, img_h, img_scale,
+                         *option_values):
         if not store_gaps:
             return (True, False,
                     "No computed gaps to export — run Compute All Gaps first.",
+                    {"width": "0%"}, "")
+        kinds = [k for k in (kinds or []) if k in ("2d", "3d")]
+        if not kinds:
+            return (True, False,
+                    "Select at least one image type (2D/3D).",
                     {"width": "0%"}, "")
         out_dir = _export_dir(img_dir, out_dir)
         if not out_dir:
             return (True, False,
                     "Set an image save folder (or the OUT folder) first.",
                     {"width": "0%"}, "")
+        try:
+            downsample = int(downsample)
+        except (TypeError, ValueError):
+            downsample = 0
         opts = _build_options("optgap", option_values)
         img_kwargs = _export_image_kwargs(img_w, img_h, img_scale)
         with _EXPORT_LOCK:
@@ -1575,7 +1702,8 @@ def register_callbacks(app):
                            result=None, error=None)
         threading.Thread(
             target=_export_all_worker,
-            args=(store_gaps, out_dir, chart_type, opts, img_kwargs),
+            args=(store_gaps, out_dir, chart_type, opts, img_kwargs, kinds,
+                  downsample),
             name="export-all-worker",
             daemon=True,
         ).start()
