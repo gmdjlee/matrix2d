@@ -302,13 +302,21 @@ _GAP_LRU_MAX = 8
 # (entry evicted between lookup and move_to_end). File loads stay outside
 # the lock so parallel workers still read distinct OUT files concurrently.
 _GAP_LOCK = threading.Lock()
+# _MATRIX_CACHE has the same concurrency exposure: the 3D batch export resolves
+# meta:: datasets (transformed_matrix -> load_matrix) from the parallel kaleido
+# pool workers, so cache dict ops are guarded the same way as _GAP_LOCK above.
+# The file load (via services.load_data) stays OUTSIDE the lock so distinct
+# files still load concurrently; a rare duplicate load of the same file is
+# acceptable.
+_MATRIX_LOCK = threading.Lock()
 
 
 def get_matrix(path: str) -> Optional[np.ndarray]:
-    arr = _MATRIX_CACHE.get(path)
-    if arr is not None:
-        _MATRIX_CACHE.move_to_end(path)
-    return arr
+    with _MATRIX_LOCK:
+        arr = _MATRIX_CACHE.get(path)
+        if arr is not None:
+            _MATRIX_CACHE.move_to_end(path)
+        return arr
 
 
 def load_matrix(meta_dict: dict) -> np.ndarray:
@@ -317,16 +325,19 @@ def load_matrix(meta_dict: dict) -> np.ndarray:
     Uses services.load_data so we honor whatever parsing the core layer does.
     """
     path = meta_dict["path"]
-    if path in _MATRIX_CACHE:
-        _MATRIX_CACHE.move_to_end(path)
-        return _MATRIX_CACHE[path]
+    with _MATRIX_LOCK:
+        arr = _MATRIX_CACHE.get(path)
+        if arr is not None:
+            _MATRIX_CACHE.move_to_end(path)
+            return arr
     from matrix2d.services.repository import load_data
     data = load_data(meta_from_dict(meta_dict))
     arr = np.asarray(data.values, dtype="float64")
-    _MATRIX_CACHE[path] = arr
-    _MATRIX_CACHE.move_to_end(path)
-    while len(_MATRIX_CACHE) > _MATRIX_CACHE_MAX:
-        _MATRIX_CACHE.popitem(last=False)
+    with _MATRIX_LOCK:
+        _MATRIX_CACHE[path] = arr
+        _MATRIX_CACHE.move_to_end(path)
+        while len(_MATRIX_CACHE) > _MATRIX_CACHE_MAX:
+            _MATRIX_CACHE.popitem(last=False)
     return arr
 
 

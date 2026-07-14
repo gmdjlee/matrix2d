@@ -189,6 +189,18 @@ charts.py stays Dash-free so it ports directly to the React migration.
   worker count `MATRIX2D_EXPORT_WORKERS` (default 4, clamp 1–8, capped at gap
   count); falls back to sequential `fig.write_image` if PlotlyScope is
   unavailable. `_EXPORT["done"]` still counts completed GAPS.
+- "Save All Filtered Images" on the 3D View tab exports `{KIND}_{stem}_3D.png`
+  per dataset option currently listed in the filtered TOP/BTM/GAP/OUT dropdowns
+  (dropdown OPTIONS, not the selected values; `_2`/`_3` on duplicate stems),
+  one 3D surface each with `opt3d` ChartOptions + TOP/BTM transforms applied
+  (no resize pairing). Rendering goes through the shared parallel kaleido pool
+  (`callbacks._pooled_figure_export`, also used by the Gap batch export);
+  destination = Image Export save folder (blank → OUT). Background worker
+  `_EXPORT3D` + root-level `export3d-all-progress-interval` poller, same
+  polling contract. `helpers._MATRIX_CACHE` and `repository._RAW_CACHE` are
+  lock-guarded (`_MATRIX_LOCK` / `_RAW_CACHE_LOCK`) because these parallel
+  workers resolve meta:: datasets through them concurrently (dict ops inside
+  the lock; file loads outside, mirroring `helpers._GAP_LOCK`).
 - PNG export destination (all Save-as-PNG paths, incl. batch export): the
   Image Export panel's "Save folder" (`folder-img`, own Browse/✕ buttons);
   blank falls back to the OUT folder (`callbacks._export_dir`).
