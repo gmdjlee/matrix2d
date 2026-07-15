@@ -297,13 +297,13 @@ _MATRIX_CACHE_MAX = 64
 _GAP_PATHS = {}          # type: Dict[str, str]  # out_name -> saved OUT file path
 _GAP_LRU = OrderedDict()  # type: "OrderedDict[str, np.ndarray]"  # bounded array cache
 _GAP_LRU_MAX = 8
-# get_gap is called concurrently by the batch-export kaleido worker pool;
+# get_gap is called concurrently by the batch-export matplotlib worker pool;
 # OrderedDict move_to_end/popitem interleavings can otherwise raise KeyError
 # (entry evicted between lookup and move_to_end). File loads stay outside
 # the lock so parallel workers still read distinct OUT files concurrently.
 _GAP_LOCK = threading.Lock()
 # _MATRIX_CACHE has the same concurrency exposure: the 3D batch export resolves
-# meta:: datasets (transformed_matrix -> load_matrix) from the parallel kaleido
+# meta:: datasets (transformed_matrix -> load_matrix) from the parallel matplotlib
 # pool workers, so cache dict ops are guarded the same way as _GAP_LOCK above.
 # The file load (via services.load_data) stays OUTSIDE the lock so distinct
 # files still load concurrently; a rare duplicate load of the same file is

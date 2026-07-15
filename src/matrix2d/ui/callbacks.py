@@ -25,7 +25,7 @@ import numpy as np
 from dash import ALL, Input, Output, State, dcc, html, no_update
 
 from matrix2d.core.summary import effective_gap_series
-from matrix2d.ui import charts, helpers, layout, table_paging
+from matrix2d.ui import charts, charts_mpl, helpers, layout, table_paging
 from matrix2d.ui.dialogs import pick_folder
 
 logger = logging.getLogger(__name__)
@@ -176,12 +176,13 @@ def _build_options(prefix, values) -> charts.ChartOptions:
 
 
 def _export_image_kwargs(width, height, scale):
-    """Sanitize export size inputs into write_image kwargs (invalid/empty -> omitted).
+    """Sanitize export size inputs into save-figure kwargs (invalid/empty -> omitted).
 
     Inputs may arrive as None, "", numbers, or junk strings and must never
     raise. width/height coerce to a positive int; scale to a positive float.
-    Anything else (blank, zero, negative, non-numeric) is omitted so plotly
-    falls back to the figure's own layout size / scale 1.
+    Anything else (blank, zero, negative, non-numeric) is omitted so the
+    exporter falls back to the figure's own size / scale 1
+    (`charts_mpl.save_figure`).
     """
     kwargs = {}
 
@@ -489,13 +490,16 @@ def _pick_reference_record(records, reference):
 
 
 # ---------------------------------------------------------------------------
-# Parallel kaleido batch-export machinery, shared by the Gap-tab and 3D-tab
+# Parallel matplotlib batch-export machinery, shared by the Gap-tab and 3D-tab
 # "Save All …" workers. Module-level so both workers reuse one implementation.
+# build_figs returns matplotlib Figures; each is written with fig.savefig via
+# charts_mpl.save_figure (no kaleido / Chromium). matplotlib's Agg draw releases
+# the GIL, so the worker pool still parallelises rendering.
 # ---------------------------------------------------------------------------
 
 def _export_worker_count(n_items):
-    """Kaleido worker count: MATRIX2D_EXPORT_WORKERS (default 4), clamped
-    to [1, 8] and capped at the number of items (never spawn idle scopes)."""
+    """Render worker count: MATRIX2D_EXPORT_WORKERS (default 4), clamped
+    to [1, 8] and capped at the number of items (never spawn idle workers)."""
     try:
         n = int(os.environ.get("MATRIX2D_EXPORT_WORKERS", "4"))
     except (TypeError, ValueError):
@@ -505,28 +509,27 @@ def _export_worker_count(n_items):
 
 
 def _pooled_figure_export(items, build_figs, out_dir, img_kwargs, on_progress):
-    """Render+write PNGs for ``items`` on a parallel kaleido scope pool.
+    """Render+write PNGs for ``items`` on a parallel matplotlib worker pool.
 
     ``items``: list of ``(label, payload)``. ``build_figs(payload)`` returns
-    ``(figs, err)`` — figs a list of ``(filename, figure)``, err a failure
-    message (item skipped, no images) or None. Prefers parallel per-thread
-    PlotlyScope instances; falls back to sequential ``fig.write_image``
-    when kaleido's low-level scope API is unavailable.
+    ``(figs, err)`` — figs a list of ``(filename, matplotlib_figure)``, err a
+    failure message (item skipped, no images) or None. Each figure is written
+    with :func:`charts_mpl.save_figure` (honouring ``img_kwargs`` width/height/
+    scale) and then closed to free memory.
     ``on_progress(done_items)`` fires after each item completes.
     Returns ``(saved_image_count, failed_messages)`` with failures ordered
     by item index.
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    # Shared, lock-guarded progress/result state across kaleido workers.
+    # Shared, lock-guarded progress/result state across render workers.
     pool_lock = threading.Lock()
     counters = {"done": 0, "saved": 0}
     failed = []  # list of (index, message), sorted by index at the end
 
-    def _render_one(scope, i, label, payload):
-        """Render+write one item's images. scope=None -> sequential
-        fig.write_image fallback. Returns images written for this item
-        (partial writes still count)."""
+    def _render_one(i, label, payload):
+        """Render+write one item's images. Returns images written for this
+        item (partial writes still count)."""
         written = 0
         try:
             figs, err = build_figs(payload)
@@ -536,12 +539,10 @@ def _pooled_figure_export(items, build_figs, out_dir, img_kwargs, on_progress):
                 return 0
             for filename, fig in figs:
                 path = os.path.join(out_dir, filename)
-                if scope is None:
-                    fig.write_image(path, **img_kwargs)
-                else:
-                    png = scope.transform(fig, format="png", **img_kwargs)
-                    with open(path, "wb") as fh:
-                        fh.write(png)
+                try:
+                    charts_mpl.save_figure(fig, path, img_kwargs)
+                finally:
+                    fig.clear()
                 written += 1
         except Exception as exc:  # noqa: BLE001 - keep exporting the rest
             logger.exception("Batch image export failed for %r", label)
@@ -556,55 +557,35 @@ def _pooled_figure_export(items, build_figs, out_dir, img_kwargs, on_progress):
             done = counters["done"]
         on_progress(done)
 
-    # Prefer parallel per-thread PlotlyScope instances (each = its own
-    # Chromium subprocess); fall back to sequential fig.write_image if
-    # kaleido's low-level scope API is unavailable.
-    try:
-        from kaleido.scopes.plotly import PlotlyScope
-    except ImportError:
-        PlotlyScope = None
+    work = queue.Queue()
+    for item in enumerate(items):
+        work.put(item)
+    n_workers = _export_worker_count(len(items))
+    logger.info("Batch image export: %d matplotlib worker(s)", n_workers)
 
-    if PlotlyScope is None:
-        logger.info("PlotlyScope unavailable; sequential export fallback")
-        for i, (label, payload) in enumerate(items):
-            _finish_item(_render_one(None, i, label, payload))
-    else:
-        work = queue.Queue()
-        for item in enumerate(items):
-            work.put(item)
-        n_workers = _export_worker_count(len(items))
-        logger.info("Batch image export: %d kaleido worker(s)", n_workers)
-
-        def _pool_worker():
-            scope = PlotlyScope()
+    def _pool_worker():
+        while True:
             try:
-                while True:
-                    try:
-                        i, (label, payload) = work.get_nowait()
-                    except queue.Empty:
-                        break
-                    try:
-                        _finish_item(_render_one(scope, i, label, payload))
-                    except Exception:  # noqa: BLE001 - never die silently
-                        logger.exception("Export pool worker item crashed")
-                        with pool_lock:
-                            failed.append(
-                                (i, "{0} (unexpected worker error)".format(label)))
-                        _finish_item(0)
-            finally:
-                try:
-                    scope._shutdown_kaleido()
-                except Exception:  # noqa: BLE001 - best-effort cleanup
-                    logger.exception("kaleido scope shutdown failed")
+                i, (label, payload) = work.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                _finish_item(_render_one(i, label, payload))
+            except Exception:  # noqa: BLE001 - never die silently
+                logger.exception("Export pool worker item crashed")
+                with pool_lock:
+                    failed.append(
+                        (i, "{0} (unexpected worker error)".format(label)))
+                _finish_item(0)
 
-        threads = [threading.Thread(target=_pool_worker,
-                                    name="export-pool-%d" % w,
-                                    daemon=True)
-                   for w in range(n_workers)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+    threads = [threading.Thread(target=_pool_worker,
+                                name="export-pool-%d" % w,
+                                daemon=True)
+               for w in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     return (counters["saved"],
             [m for _, m in sorted(failed, key=lambda x: x[0])])
@@ -1595,7 +1576,8 @@ def register_callbacks(app):
             return _empty_fig(), "Render error: " + traceback.format_exc(limit=2)
 
     # -------------------------------------------------------------------
-    # 5. Export current 2D / 3D figures as PNG (kaleido). Destination is the
+    # 5. Export current 2D / 3D figures as PNG (matplotlib, reconstructed from
+    #    the displayed plotly figure). Destination is the
     #    Image Export "Save folder" (sidebar); blank falls back to OUT.
     # -------------------------------------------------------------------
     def _export_dir(img_dir, out_dir):
@@ -1609,9 +1591,12 @@ def register_callbacks(app):
             return "Set an image save folder (or the OUT folder) first."
         try:
             os.makedirs(out_dir, exist_ok=True)
-            fig = charts.go.Figure(fig_dict)
+            fig = charts_mpl.figure_from_plotly_dict(fig_dict)  # matplotlib
             path = os.path.join(out_dir, default_name)
-            fig.write_image(path, **(img_kwargs or {}))  # kaleido backend
+            try:
+                charts_mpl.save_figure(fig, path, img_kwargs)
+            finally:
+                fig.clear()
             logger.info("Exported figure -> %s", path)
             return "Saved: " + path
         except Exception:  # noqa: BLE001
@@ -1672,7 +1657,7 @@ def register_callbacks(app):
                        _export_image_kwargs(img_w, img_h, img_scale))
 
     # 5b. Batch export: one 2D contour + one 3D surface PNG per computed gap.
-    #    Runs in a background thread (2*N kaleido renders would otherwise
+    #    Runs in a background thread (2*N matplotlib renders would otherwise
     #    block the UI for large gap counts); a dcc.Interval polls the shared
     #    _EXPORT state to drive the progress bar and publish the final status,
     #    mirroring the scan/compute pattern above (same polling contract).
@@ -1686,12 +1671,13 @@ def register_callbacks(app):
         figs = []
         if "2d" in kinds:
             if chart_type == "heatmap":
-                fig2d = charts.heatmap_2d(values, gap_opts)
+                fig2d = charts_mpl.heatmap_2d(values, gap_opts)
             else:
-                fig2d = charts.contour_2d(values, gap_opts)
+                fig2d = charts_mpl.contour_2d(values, gap_opts)
             figs.append(("_2D.png", fig2d))
         if "3d" in kinds:
-            figs.append(("_3D.png", charts.surface_3d(values, gap_opts, name=name)))
+            figs.append(("_3D.png",
+                         charts_mpl.surface_3d(values, gap_opts, name=name)))
         return figs
 
     def _export_all_worker(store_gaps, out_dir, chart_type, opts,
@@ -1744,7 +1730,7 @@ def register_callbacks(app):
         """Export one 3D surface PNG per filtered 3D-tab dataset option.
 
         ``items`` are the ``_filtered_3d_items`` dicts (key/label/filename).
-        Runs on the shared parallel kaleido pool, same as the Gap batch export.
+        Runs on the shared parallel matplotlib pool, same as the Gap batch export.
         """
         total = len(items)
         with _EXPORT3D_LOCK:
@@ -1766,8 +1752,8 @@ def register_callbacks(app):
                 fig_opts = dataclasses.replace(
                     opts, title=opts.title or item["label"])
                 return [(item["filename"],
-                         charts.surface_3d(values, fig_opts,
-                                           name=item["label"]))], None
+                         charts_mpl.surface_3d(values, fig_opts,
+                                               name=item["label"]))], None
 
             def _on_progress(done):
                 with _EXPORT3D_LOCK:
@@ -1885,7 +1871,7 @@ def register_callbacks(app):
 
     # 5c. 3D-tab batch export: one 3D surface PNG per dataset currently listed
     #    in the (filter-narrowed) TOP/BTM/GAP/OUT dropdowns (options, not the
-    #    selected values). Runs in a background thread on the shared kaleido
+    #    selected values). Runs in a background thread on the shared matplotlib
     #    pool; the root-level export3d-all-progress-interval polls _EXPORT3D
     #    (same polling contract as the Gap batch export above).
     @app.callback(

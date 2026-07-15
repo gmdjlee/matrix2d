@@ -6,10 +6,10 @@
 #
 # Output: dist/WarpageAnalysis.exe  (onefile)
 #
-# Why a spec (not a bare `pyinstaller app_main.py`): Dash, plotly and kaleido
-# ship data files (JS bundles, plotly validators, the kaleido renderer binary)
-# that PyInstaller's default analysis does NOT pick up. collect_all() grabs
-# them. The app's own assets/style.css is added by hand.
+# Why a spec (not a bare `pyinstaller app_main.py`): Dash and plotly ship data
+# files (JS bundles, plotly validators) that PyInstaller's default analysis does
+# NOT pick up. collect_all() grabs them. PNG export uses matplotlib (no kaleido
+# / Chromium renderer). The app's own assets/style.css is added by hand.
 
 import os
 from PyInstaller.utils.hooks import collect_all
@@ -25,7 +25,7 @@ binaries = []
 hiddenimports = []
 
 # Bundle package data + hidden imports for the libraries that need it.
-for pkg in ("dash", "plotly", "kaleido", "scipy", "pandas"):
+for pkg in ("dash", "plotly", "matplotlib", "scipy", "pandas"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
