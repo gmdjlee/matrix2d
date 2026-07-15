@@ -21,7 +21,9 @@ mid-run, killing background scan/compute threads and wiping dcc.Store state.
 
 Python 3.8.10 — do NOT use `X | Y` union syntax or `match`. Use
 `typing.Optional/List/Tuple`. Deps pinned in requirements.txt
-(dash 2.17.1, plotly 5.24.1, scipy 1.10.1, numpy 1.24.4, kaleido 0.2.1).
+(dash 2.17.1, plotly 5.24.1, scipy 1.10.1, numpy 1.24.4, matplotlib 3.7.5).
+Charts DISPLAY via plotly (interactive dcc.Graph); PNG export renders via
+matplotlib (`ui/charts_mpl.py`) — no kaleido/Chromium.
 
 ## Architecture (clean, layered)
 
@@ -38,7 +40,8 @@ src/matrix2d/
     repository.py  # scan_folder, load_data, save_matrix
     pipeline.py    # plan_jobs, run_pipeline (all TOP×BTM combos)
   ui/          # Dash presentation layer
-    charts.py  # pure plotly figure builders (no Dash imports)
+    charts.py      # pure plotly figure builders (no Dash imports) — screen display
+    charts_mpl.py  # matplotlib figure builders + plotly-dict reconstruction — PNG export
     layout.py / callbacks.py / app.py
 ```
 
@@ -180,21 +183,21 @@ charts.py stays Dash-free so it ports directly to the React migration.
   table on the RIGHT; `.table-wrap` scrolls internally (max-height, sticky
   header) instead of the page.
 - "Save All Images" exports `{out_name}_2D.png` / `_3D.png` per computed gap
-  via kaleido, using current ChartOptions. A `export-all-kinds` checklist
-  (2D/3D, both default) picks which images; a `export-all-downsample` dropdown
-  stride-downsamples the gap grid (max shape 300/200/150/100, "Off" default)
-  for export only (no core-layer change, NaN/blank pattern preserved, shows in
-  the title's rows×cols). Rendering runs a parallel per-thread kaleido scope
-  pool (`kaleido.scopes.plotly.PlotlyScope`, one Chromium subprocess each) —
-  worker count `MATRIX2D_EXPORT_WORKERS` (default 4, clamp 1–8, capped at gap
-  count); falls back to sequential `fig.write_image` if PlotlyScope is
-  unavailable. `_EXPORT["done"]` still counts completed GAPS.
+  via matplotlib (`charts_mpl`), using current ChartOptions. A
+  `export-all-kinds` checklist (2D/3D, both default) picks which images; a
+  `export-all-downsample` dropdown stride-downsamples the gap grid (max shape
+  300/200/150/100, "Off" default) for export only (no core-layer change,
+  NaN/blank pattern preserved, shows in the title's rows×cols). Rendering runs
+  a parallel matplotlib worker pool (`charts_mpl.save_figure` per figure;
+  Agg draw releases the GIL) — worker count `MATRIX2D_EXPORT_WORKERS` (default
+  4, clamp 1–8, capped at gap count). `_EXPORT["done"]` still counts completed
+  GAPS.
 - "Save All Filtered Images" on the 3D View tab exports `{KIND}_{stem}_3D.png`
   per dataset option currently listed in the filtered TOP/BTM/GAP/OUT dropdowns
   (dropdown OPTIONS, not the selected values; `_2`/`_3` on duplicate stems),
   one 3D surface each with `opt3d` ChartOptions + TOP/BTM transforms applied
-  (no resize pairing). Rendering goes through the shared parallel kaleido pool
-  (`callbacks._pooled_figure_export`, also used by the Gap batch export);
+  (no resize pairing). Rendering goes through the shared parallel matplotlib
+  pool (`callbacks._pooled_figure_export`, also used by the Gap batch export);
   destination = Image Export save folder (blank → OUT). Background worker
   `_EXPORT3D` + root-level `export3d-all-progress-interval` poller, same
   polling contract. `helpers._MATRIX_CACHE` and `repository._RAW_CACHE` are

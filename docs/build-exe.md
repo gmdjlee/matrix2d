@@ -10,11 +10,12 @@ Windows에서 Python 없이 더블클릭으로 실행되는 `WarpageAnalysis.exe
 ```bash
 # 저장소 루트에서
 pip install -r requirements.txt
-pip install dash==2.17.1 plotly==5.24.1 kaleido==0.2.1   # requirements에 없으면
+pip install dash==2.17.1 plotly==5.24.1   # requirements에 없으면 (화면 표시용)
 pip install pyinstaller
 ```
 
-> kaleido는 PNG(이미지) 저장에 필요. 없으면 "Save ... as PNG" 기능만 안 됨.
+> PNG(이미지) 저장은 matplotlib 사용 (requirements.txt에 포함). 화면 차트는
+> plotly(대화형), 파일 저장은 matplotlib — kaleido/Chromium 불필요.
 
 ## 2. 빌드
 
@@ -41,8 +42,8 @@ dist/WarpageAnalysis.exe   ← 이 파일 하나가 전부
 
 ## 왜 그냥 `pyinstaller app_main.py`가 아니라 .spec인가
 
-Dash·plotly·kaleido는 코드 외에 **데이터 파일**(JS 번들, plotly validators,
-kaleido 렌더러 실행파일)을 함께 씀. PyInstaller 기본 분석은 이걸 못 챙김 →
+Dash·plotly·matplotlib는 코드 외에 **데이터 파일**(JS 번들, plotly validators,
+matplotlib 폰트·데이터)을 함께 씀. PyInstaller 기본 분석은 이걸 못 챙김 →
 `warpage.spec`의 `collect_all()`이 모아줌. 앱 자체 CSS(`assets/style.css`)도
 spec에서 직접 추가함.
 
@@ -61,7 +62,7 @@ spec에서 직접 추가함.
   루프 또는 `hiddenimports`에 추가.
 - **브라우저는 열리는데 화면이 비거나 CSS가 안 먹음** — assets 경로 문제.
   spec의 `datas += [("src/matrix2d/ui/assets", "matrix2d/ui/assets")]` 확인.
-- **PNG 저장 실패** — kaleido 미포함. `pip install kaleido==0.2.1` 후 재빌드.
+- **PNG 저장 실패** — matplotlib 미포함. `pip install matplotlib==3.7.5` 후 재빌드.
 - **onefile exe가 느리게 시작** — 정상. 매 실행마다 임시폴더로 압축을 풂.
   빠른 시작이 필요하면 위 "실행 폴더형"으로.
 - **백신이 오탐** — PyInstaller onefile의 알려진 현상. 서명하거나

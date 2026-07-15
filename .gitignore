@@ -30,6 +30,9 @@ demo_data/
 # Runtime logs
 logs/
 
+# Scratch / throwaway output (e.g. scripts/compare_charts.py renders)
+scratch/
+
 # IDE / editor
 .idea/
 .vscode/

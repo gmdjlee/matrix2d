@@ -14,7 +14,8 @@ Electron+React+TS planned — only `src/matrix2d/ui/` will be replaced).
 - Python **3.8.10** (Windows). Forbidden: `X | Y` unions, `match`,
   `functools.cache`. Use `typing.Optional/List/Tuple/Dict`.
 - Pinned deps: numpy 1.24.4, scipy 1.10.1, dash 2.17.1, plotly 5.24.1,
-  kaleido 0.2.1, pytest 8.3.5 (`requirements.txt`).
+  matplotlib 3.7.5, pytest 8.3.5 (`requirements.txt`). Charts display via
+  plotly (interactive); PNG export renders via matplotlib (`ui/charts_mpl.py`).
 
 ## Commands
 
