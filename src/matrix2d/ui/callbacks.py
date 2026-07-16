@@ -312,31 +312,93 @@ def _stem_for_key(key):
     return key
 
 
-def _filtered_3d_items(options_by_kind):
-    """Export work list from the 3D tab's (filtered) dataset dropdown options.
+def _phase_lookup(store_metas) -> dict:
+    """path -> (sample_no, phase, temp_c) for every scanned meta, per kind.
+
+    Phase is derived per kind so peak-time assignment sees each sample's full
+    set of measurements (see :func:`helpers.phase_entries`).
+    """
+    out = {}
+    for kind in ("TOP", "BTM", "GAP", "OUT"):
+        for e in helpers.phase_entries(_kind_metas(store_metas, kind)):
+            out[e["meta"]["path"]] = (e["sample_no"], e["phase"], e["temp_c"])
+    return out
+
+
+def _group_key_for(key, phase_lookup):
+    """(sample_no, phase, temp_c) grouping key for a 3D dataset key, or None.
+
+    Computed gaps (``gap::name``) parse straight from the output name; scanned
+    ``meta::path`` datasets read the precomputed phase lookup. None when the
+    key cannot be resolved to a sample/phase/temperature (kept ungrouped).
+    """
+    if key.startswith("gap::"):
+        parsed = helpers.parse_gap_name(key[len("gap::"):])
+        if parsed:
+            return (parsed["top_no"], parsed["phase"], parsed["temp_c"])
+        return None
+    if key.startswith("meta::"):
+        return phase_lookup.get(key[len("meta::"):])
+    return None
+
+
+def _uniquify(base, used):
+    """base, or base_2 / base_3 / ... until unused; records the pick."""
+    name = base
+    n = 2
+    while name in used:
+        name = "{0}_{1}".format(base, n)
+        n += 1
+    used.add(name)
+    return name
+
+
+def _grouped_3d_items(options_by_kind, store_metas):
+    """Group the 3D tab's (filtered) dropdown options into combined-image jobs.
 
     ``options_by_kind``: list of ``(kind, options)`` where options are the
-    dropdown option dicts ({"label", "value"}). Returns a list of
-    ``{"key", "label", "filename"}`` — filename is
-    ``{KIND}_{source-file-stem}_3D.png`` (kind prefix disambiguates
-    same-named files across folders); duplicates get ``_2``, ``_3``, ...
+    dropdown option dicts ({"label", "value"}). Datasets that share a
+    (sample_no, phase, temperature) point are combined into ONE image — the
+    same multi-surface overlay the 3D chart shows — instead of one image per
+    dataset. Returns a list of
+    ``{"filename", "label", "members": [{"key", "kind", "label"}, ...]}``.
+
+    Combined groups are named ``PT{sample:04d}-{phase}{temp}C_3D.png``; options
+    that cannot be resolved to a point fall back to their own single-surface
+    image (``{KIND}_{stem}_3D.png``). Duplicate names get ``_2``, ``_3``, ...
     """
-    used = set()
-    items = []
+    phase_lookup = _phase_lookup(store_metas)
+    groups = {}          # group_key -> list of member dicts
+    order = []           # group_keys in first-seen order
+    ungrouped = []       # members without a resolvable group key
     for kind, options in options_by_kind:
         for o in options or []:
             key = o.get("value")
-            label = o.get("label") or key
             if not key:
                 continue
-            base = "{0}_{1}_3D".format(kind, _stem_for_key(key))
-            name = base
-            n = 2
-            while name in used:
-                name = "{0}_{1}".format(base, n)
-                n += 1
-            used.add(name)
-            items.append({"key": key, "label": label, "filename": name + ".png"})
+            member = {"key": key, "kind": kind, "label": o.get("label") or key}
+            gk = _group_key_for(key, phase_lookup)
+            if gk is None:
+                ungrouped.append(member)
+            elif gk in groups:
+                groups[gk].append(member)
+            else:
+                groups[gk] = [member]
+                order.append(gk)
+
+    used = set()
+    items = []
+    for gk in order:
+        sample_no, phase, temp_c = gk
+        label = "PT{0:04d}-{1}{2}C".format(sample_no, phase, temp_c)
+        name = _uniquify(label + "_3D", used)
+        items.append({"filename": name + ".png", "label": label,
+                      "members": groups[gk]})
+    for member in ungrouped:
+        base = "{0}_{1}_3D".format(member["kind"], _stem_for_key(member["key"]))
+        name = _uniquify(base, used)
+        items.append({"filename": name + ".png", "label": member["label"],
+                      "members": [member]})
     return items
 
 
@@ -1726,34 +1788,67 @@ def register_callbacks(app):
                 _EXPORT["running"] = False
 
     def _export_3d_all_worker(items, store_metas, out_dir, opts, img_kwargs,
-                              top_cfg, btm_cfg):
-        """Export one 3D surface PNG per filtered 3D-tab dataset option.
+                              top_cfg, btm_cfg, show_resized, reference):
+        """Export one combined 3D surface PNG per filtered 3D-tab group.
 
-        ``items`` are the ``_filtered_3d_items`` dicts (key/label/filename).
-        Runs on the shared parallel matplotlib pool, same as the Gap batch export.
+        ``items`` are the ``_grouped_3d_items`` dicts (filename/label/members).
+        Each group's datasets are overlaid in one ``multi_surface_3d`` figure —
+        the same combination the 3D chart shows (TOP/BTM transforms + optional
+        resize preview applied, matching :func:`render_3d`). Runs on the shared
+        parallel matplotlib pool, same as the Gap batch export.
         """
+        from matrix2d.core.resize import resize_crop_blank
+
         total = len(items)
         with _EXPORT3D_LOCK:
             _EXPORT3D["total"] = total
-        logger.info("3D batch image export started: %d dataset(s) -> %r",
+        logger.info("3D batch image export started: %d group(s) -> %r",
                     total, out_dir)
         try:
             def _build_figs(item):
-                """(figs, err) for one dataset: a single (filename, figure)."""
-                try:
-                    values = _resolve_values(item["key"], store_metas,
-                                             top_cfg, btm_cfg)
-                except ValueError as exc:  # zero cell out of bounds / blank
-                    return [], str(exc)
-                if values is None:
-                    return [], "not loadable"
-                # surface_3d folds the rows×cols suffix into the trace name /
-                # title itself when opts.show_shape, so don't pre-append it.
+                """(figs, err) for one group: a single combined (filename, fig)."""
+                records = []
+                for member in item["members"]:
+                    try:
+                        values = _resolve_values(member["key"], store_metas,
+                                                 top_cfg, btm_cfg)
+                    except ValueError as exc:  # zero cell out of bounds / blank
+                        return [], str(exc)
+                    if values is None:
+                        return [], "not loadable"
+                    records.append({"key": member["key"], "kind": member["kind"],
+                                    "values": values})
+                if not records:
+                    return [], "no loadable datasets"
+
+                # Resize preview: bring every TOP/BTM dataset in the group onto
+                # one reference grid (GAP/OUT shown as-is), mirroring render_3d.
+                if show_resized == "resized":
+                    inputs = [r for r in records if r["kind"] in ("TOP", "BTM")]
+                    if len(inputs) >= 2:
+                        ref = _pick_reference_record(inputs, reference)
+                        for r in inputs:
+                            if r is ref:
+                                continue
+                            try:
+                                r["values"] = resize_crop_blank(
+                                    r["values"], ref["values"].shape)
+                            except ValueError:
+                                pass  # keep the un-resized surface
+
+                # multi_surface_3d takes prebuilt names, so the rows×cols suffix
+                # is folded into each label here (as render_3d does).
+                surfaces = []
+                for r in records:
+                    label = _key_label(r["key"], store_metas)
+                    if opts.show_shape:
+                        label = "{0} ({1}×{2})".format(
+                            label, r["values"].shape[0], r["values"].shape[1])
+                    surfaces.append((label, r["values"], 0.0))
                 fig_opts = dataclasses.replace(
                     opts, title=opts.title or item["label"])
                 return [(item["filename"],
-                         charts_mpl.surface_3d(values, fig_opts,
-                                               name=item["label"]))], None
+                         charts_mpl.multi_surface_3d(surfaces, fig_opts))], None
 
             def _on_progress(done):
                 with _EXPORT3D_LOCK:
@@ -1888,6 +1983,8 @@ def register_callbacks(app):
          State("store-metas", "data"),
          State("folder-img", "value"),
          State("folder-out", "value"),
+         State("data-show-resized", "value"),
+         State("gap-reference", "value"),
          State("export-img-width", "value"),
          State("export-img-height", "value"),
          State("export-img-scale", "value")]
@@ -1895,12 +1992,13 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def start_export_3d_all(_n, top_opts, btm_opts, gap_opts, out_opts,
-                            store_metas, img_dir, out_dir, img_w, img_h,
-                            img_scale, *rest):
+                            store_metas, img_dir, out_dir, show_resized,
+                            reference, img_w, img_h, img_scale, *rest):
         option_values = rest[:_N3D]
         transform_values = rest[_N3D:]
-        items = _filtered_3d_items([("TOP", top_opts), ("BTM", btm_opts),
-                                    ("GAP", gap_opts), ("OUT", out_opts)])
+        items = _grouped_3d_items([("TOP", top_opts), ("BTM", btm_opts),
+                                   ("GAP", gap_opts), ("OUT", out_opts)],
+                                  store_metas)
         if not items:
             return (True, False,
                     "No datasets match the current filter — scan folders "
@@ -1921,7 +2019,8 @@ def register_callbacks(app):
                              result=None, error=None)
         threading.Thread(
             target=_export_3d_all_worker,
-            args=(items, store_metas, dest, opts, img_kwargs, top_cfg, btm_cfg),
+            args=(items, store_metas, dest, opts, img_kwargs, top_cfg, btm_cfg,
+                  show_resized, reference),
             name="export-3d-all-worker",
             daemon=True,
         ).start()
@@ -1944,7 +2043,7 @@ def register_callbacks(app):
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
-        label = ("{0} / {1} datasets".format(done, total) if total
+        label = ("{0} / {1} images".format(done, total) if total
                  else "Exporting...")
 
         if running:
@@ -1961,4 +2060,4 @@ def register_callbacks(app):
             return no_update, True, False, no_update, no_update
         logger.info("3D export-all poll: publishing result to UI")
         return (result, True, False, {"width": "100%"},
-                "{0} / {0} datasets — done".format(total))
+                "{0} / {0} images — done".format(total))
