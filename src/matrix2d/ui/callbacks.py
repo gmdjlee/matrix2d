@@ -353,52 +353,138 @@ def _uniquify(base, used):
     return name
 
 
+def _gap_anchor(member, store_metas):
+    """(top_no, btm_no, phase, temp_c) for a GAP/OUT member, else None.
+
+    Computed gaps (``gap::name``) parse from the output name; scanned GAP/OUT
+    ``meta::path`` datasets read their meta dict (gap-named files carry an
+    explicit ``btm_no``/``phase``). None for non-gap members or unparseable
+    names.
+    """
+    kind, key = member["kind"], member["key"]
+    if kind not in ("GAP", "OUT"):
+        return None
+    if key.startswith("gap::"):
+        parsed = helpers.parse_gap_name(key[len("gap::"):])
+        if parsed:
+            return (parsed["top_no"], parsed["btm_no"],
+                    parsed["phase"], parsed["temp_c"])
+        return None
+    if key.startswith("meta::"):
+        md = _find_meta(store_metas, key[len("meta::"):])
+        if md and md.get("btm_no") is not None and md.get("phase") in ("H", "C"):
+            try:
+                return (int(md["sample_no"]), int(md["btm_no"]),
+                        md["phase"], int(md["temp_c"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+    return None
+
+
+def _match_component(index, sample_no, phase, temp_c, tol):
+    """Best TOP/BTM member for a gap's (sample, phase, temp), or None.
+
+    ``index``: ``{(sample_no, phase): [(temp_c, member), ...]}``. Exact temp
+    wins; otherwise the nearest temp within ``tol`` degrees (BTM temps may lag
+    the TOP temp the gap is named for — see ``pipeline.TEMP_TOLERANCE_C``).
+    """
+    cands = index.get((sample_no, phase))
+    if not cands:
+        return None
+    for t, m in cands:
+        if t == temp_c:
+            return m
+    best, best_d = None, None
+    for t, m in cands:
+        d = abs(t - temp_c)
+        if d <= tol and (best_d is None or d < best_d):
+            best, best_d = m, d
+    return best
+
+
 def _grouped_3d_items(options_by_kind, store_metas):
-    """Group the 3D tab's (filtered) dropdown options into combined-image jobs.
+    """Turn the 3D tab's (filtered) dropdown options into combined-image jobs.
 
     ``options_by_kind``: list of ``(kind, options)`` where options are the
-    dropdown option dicts ({"label", "value"}). Datasets that share a
-    (sample_no, phase, temperature) point are combined into ONE image — the
-    same multi-surface overlay the 3D chart shows — instead of one image per
-    dataset. Returns a list of
+    dropdown option dicts ({"label", "value"}). Each GAP/OUT dataset anchors
+    ONE image overlaying its own surface with the matching TOP (sample = TOP no)
+    and BTM (sample = BTM no) datasets at the same phase/temperature — the same
+    ``TOP + GAP + BTM`` combination the 3D chart shows for that pairing. So a
+    TOP shared by several gaps (TOP1-BTM1..4) yields one image per gap, not a
+    single lumped overlay. Returns a list of
     ``{"filename", "label", "members": [{"key", "kind", "label"}, ...]}``.
 
-    Combined groups are named ``PT{sample:04d}-{phase}{temp}C_3D.png``; options
-    that cannot be resolved to a point fall back to their own single-surface
-    image (``{KIND}_{stem}_3D.png``). Duplicate names get ``_2``, ``_3``, ...
+    Combined images are named ``{KIND}-{phase}{temp}-TOP{n}-BTM{m}.png`` (GAP
+    output naming, e.g. ``GAP-H25-TOP1-BTM1.png``). TOP/BTM options never pulled
+    into any gap image — and any gap-named option that fails to parse — fall
+    back to their own single-surface ``{KIND}_{stem}_3D.png``. Duplicate names
+    get ``_2``, ``_3``, ...
     """
+    from matrix2d.services.pipeline import TEMP_TOLERANCE_C
+
     phase_lookup = _phase_lookup(store_metas)
-    groups = {}          # group_key -> list of member dicts
-    order = []           # group_keys in first-seen order
-    ungrouped = []       # members without a resolvable group key
+    by_kind = {}
     for kind, options in options_by_kind:
         for o in options or []:
             key = o.get("value")
             if not key:
                 continue
-            member = {"key": key, "kind": kind, "label": o.get("label") or key}
-            gk = _group_key_for(key, phase_lookup)
+            by_kind.setdefault(kind, []).append(
+                {"key": key, "kind": kind, "label": o.get("label") or key})
+
+    def _index(members):
+        idx = {}
+        for m in members:
+            gk = _group_key_for(m["key"], phase_lookup)
             if gk is None:
-                ungrouped.append(member)
-            elif gk in groups:
-                groups[gk].append(member)
-            else:
-                groups[gk] = [member]
-                order.append(gk)
+                continue
+            sample_no, phase, temp_c = gk
+            idx.setdefault((sample_no, phase), []).append((temp_c, m))
+        return idx
+
+    top_idx = _index(by_kind.get("TOP", []))
+    btm_idx = _index(by_kind.get("BTM", []))
 
     used = set()
     items = []
-    for gk in order:
-        sample_no, phase, temp_c = gk
-        label = "PT{0:04d}-{1}{2}C".format(sample_no, phase, temp_c)
-        name = _uniquify(label + "_3D", used)
-        items.append({"filename": name + ".png", "label": label,
-                      "members": groups[gk]})
-    for member in ungrouped:
-        base = "{0}_{1}_3D".format(member["kind"], _stem_for_key(member["key"]))
-        name = _uniquify(base, used)
-        items.append({"filename": name + ".png", "label": member["label"],
-                      "members": [member]})
+    consumed = set()  # keys pulled into at least one combined image
+    for kind in ("GAP", "OUT"):
+        for m in by_kind.get(kind, []):
+            anchor = _gap_anchor(m, store_metas)
+            if anchor is None:
+                continue  # unparseable gap name -> single-surface fallback below
+            top_no, btm_no, phase, temp_c = anchor
+            members = []
+            top_m = _match_component(top_idx, top_no, phase, temp_c,
+                                     TEMP_TOLERANCE_C)
+            if top_m is not None:
+                members.append(top_m)
+                consumed.add(top_m["key"])
+            members.append(m)
+            consumed.add(m["key"])
+            btm_m = _match_component(btm_idx, btm_no, phase, temp_c,
+                                     TEMP_TOLERANCE_C)
+            if btm_m is not None:
+                members.append(btm_m)
+                consumed.add(btm_m["key"])
+            base = "{0}-{1}{2}-TOP{3}-BTM{4}".format(
+                kind, phase, temp_c, top_no, btm_no)
+            name = _uniquify(base, used)
+            items.append({"filename": name + ".png", "label": base,
+                          "members": members})
+
+    # Fallback: TOP/BTM options with no matching gap (and gap-named options that
+    # failed to parse) still export as their own single surface.
+    for kind, options in options_by_kind:
+        for o in options or []:
+            key = o.get("value")
+            if not key or key in consumed:
+                continue
+            member = {"key": key, "kind": kind, "label": o.get("label") or key}
+            base = "{0}_{1}_3D".format(kind, _stem_for_key(key))
+            name = _uniquify(base, used)
+            items.append({"filename": name + ".png", "label": member["label"],
+                          "members": [member]})
     return items
 
 
@@ -1789,24 +1875,25 @@ def register_callbacks(app):
 
     def _export_3d_all_worker(items, store_metas, out_dir, opts, img_kwargs,
                               top_cfg, btm_cfg, show_resized, reference):
-        """Export one combined 3D surface PNG per filtered 3D-tab group.
+        """Export one combined 3D surface PNG per filtered 3D-tab image job.
 
         ``items`` are the ``_grouped_3d_items`` dicts (filename/label/members).
-        Each group's datasets are overlaid in one ``multi_surface_3d`` figure —
-        the same combination the 3D chart shows (TOP/BTM transforms + optional
-        resize preview applied, matching :func:`render_3d`). Runs on the shared
-        parallel matplotlib pool, same as the Gap batch export.
+        Each job's datasets (a gap plus its matching TOP/BTM) are overlaid in one
+        ``multi_surface_3d`` figure — the same combination the 3D chart shows
+        (TOP/BTM transforms + optional resize preview applied, matching
+        :func:`render_3d`). Runs on the shared parallel matplotlib pool, same as
+        the Gap batch export.
         """
         from matrix2d.core.resize import resize_crop_blank
 
         total = len(items)
         with _EXPORT3D_LOCK:
             _EXPORT3D["total"] = total
-        logger.info("3D batch image export started: %d group(s) -> %r",
+        logger.info("3D batch image export started: %d image(s) -> %r",
                     total, out_dir)
         try:
             def _build_figs(item):
-                """(figs, err) for one group: a single combined (filename, fig)."""
+                """(figs, err) for one job: a single combined (filename, fig)."""
                 records = []
                 for member in item["members"]:
                     try:
