@@ -11,7 +11,7 @@ import numpy as np
 from matrix2d.ui.callbacks import (
     _downsample_for_export,
     _export_image_kwargs,
-    _filtered_3d_items,
+    _grouped_3d_items,
     _stem_for_key,
 )
 
@@ -155,57 +155,102 @@ def test_stem_for_key_unknown_passthrough():
     assert _stem_for_key("weird-key") == "weird-key"
 
 
-# --- _filtered_3d_items -----------------------------------------------------
+# --- _grouped_3d_items ------------------------------------------------------
+# Options whose key can't be resolved to a (sample, phase, temp) point (unknown
+# meta path / non-gap-named value) fall back to one single-surface image each
+# with the legacy {KIND}_{stem}_3D.png name — exercised with store_metas={}.
 
-def test_filtered_3d_items_kind_prefix_in_filename():
-    items = _filtered_3d_items(
-        [("TOP", [{"label": "top a", "value": "meta::/x/a.dat"}])])
+def test_grouped_3d_items_ungroupable_kind_prefix_in_filename():
+    items = _grouped_3d_items(
+        [("TOP", [{"label": "top a", "value": "meta::/x/a.dat"}])], {})
     assert len(items) == 1
     assert items[0]["filename"] == "TOP_a_3D.png"
-    assert items[0]["key"] == "meta::/x/a.dat"
-    assert items[0]["label"] == "top a"
+    assert [m["key"] for m in items[0]["members"]] == ["meta::/x/a.dat"]
+    assert items[0]["members"][0]["label"] == "top a"
 
 
-def test_filtered_3d_items_order_preserved_across_kinds():
-    items = _filtered_3d_items([
+def test_grouped_3d_items_ungroupable_order_preserved_across_kinds():
+    items = _grouped_3d_items([
         ("TOP", [{"label": "t", "value": "meta::/x/t.dat"}]),
         ("BTM", [{"label": "b", "value": "meta::/x/b.dat"}]),
         ("GAP", [{"label": "g", "value": "gap::g.txt"}]),
         ("OUT", [{"label": "o", "value": "meta::/x/o.dat"}]),
-    ])
+    ], {})
     assert [it["filename"] for it in items] == [
         "TOP_t_3D.png", "BTM_b_3D.png", "GAP_g_3D.png", "OUT_o_3D.png"]
 
 
-def test_filtered_3d_items_duplicate_stems_get_numeric_suffix():
+def test_grouped_3d_items_duplicate_stems_get_numeric_suffix():
     # same kind + same stem across two folders -> _2 on the second
-    items = _filtered_3d_items([("TOP", [
+    items = _grouped_3d_items([("TOP", [
         {"label": "a", "value": "meta::/x/a.dat"},
         {"label": "a2", "value": "meta::/y/a.dat"},
         {"label": "a3", "value": "meta::/z/a.dat"},
-    ])])
+    ])], {})
     assert [it["filename"] for it in items] == [
         "TOP_a_3D.png", "TOP_a_3D_2.png", "TOP_a_3D_3.png"]
 
 
-def test_filtered_3d_items_none_and_empty_options_skipped():
-    items = _filtered_3d_items([
+def test_grouped_3d_items_none_and_empty_options_skipped():
+    items = _grouped_3d_items([
         ("TOP", None),
         ("BTM", []),
         ("GAP", [{"label": "g", "value": "gap::g.txt"}]),
-    ])
+    ], {})
     assert [it["filename"] for it in items] == ["GAP_g_3D.png"]
 
 
-def test_filtered_3d_items_option_missing_value_skipped():
-    items = _filtered_3d_items([("TOP", [
+def test_grouped_3d_items_option_missing_value_skipped():
+    items = _grouped_3d_items([("TOP", [
         {"label": "no value"},
         {"label": "ok", "value": "meta::/x/ok.dat"},
-    ])])
+    ])], {})
     assert [it["filename"] for it in items] == ["TOP_ok_3D.png"]
 
 
-def test_filtered_3d_items_label_falls_back_to_key():
-    items = _filtered_3d_items(
-        [("GAP", [{"value": "gap::g.txt"}])])
-    assert items[0]["label"] == "gap::g.txt"
+def test_grouped_3d_items_label_falls_back_to_key():
+    items = _grouped_3d_items(
+        [("GAP", [{"value": "gap::g.txt"}])], {})
+    assert items[0]["members"][0]["label"] == "gap::g.txt"
+
+
+def test_grouped_3d_items_computed_gaps_same_point_combine():
+    # Two computed gaps sharing (top_no=3, C, 25) -> ONE combined image.
+    items = _grouped_3d_items([("GAP", [
+        {"label": "g8", "value": "gap::TEST-C25_TOP3-BTM8.txt"},
+        {"label": "g9", "value": "gap::TEST-C25_TOP3-BTM9.txt"},
+    ])], {})
+    assert len(items) == 1
+    assert items[0]["filename"] == "PT0003-C25C_3D.png"
+    assert [m["key"] for m in items[0]["members"]] == [
+        "gap::TEST-C25_TOP3-BTM8.txt", "gap::TEST-C25_TOP3-BTM9.txt"]
+
+
+def test_grouped_3d_items_different_points_stay_separate():
+    items = _grouped_3d_items([("GAP", [
+        {"label": "h", "value": "gap::T-H25_TOP1-BTM2.txt"},
+        {"label": "c", "value": "gap::T-C25_TOP1-BTM2.txt"},
+    ])], {})
+    assert [it["filename"] for it in items] == [
+        "PT0001-H25C_3D.png", "PT0001-C25C_3D.png"]
+
+
+def _meta(kind, sample, temp, time_s, path):
+    return {"title": "T", "sample_no": sample, "time_s": time_s,
+            "temp_c": temp, "kind": kind, "path": path}
+
+
+def test_grouped_3d_items_meta_same_point_combines_across_kinds():
+    # A TOP and a BTM at the same sample/temp/phase (single measurement each
+    # -> peak == itself -> phase 'H') combine into one PT0001-H25C image.
+    store_metas = {
+        "TOP": [_meta("TOP", 1, 25, 100, "/x/top.dat")],
+        "BTM": [_meta("BTM", 1, 25, 100, "/x/btm.dat")],
+    }
+    items = _grouped_3d_items([
+        ("TOP", [{"label": "t", "value": "meta::/x/top.dat"}]),
+        ("BTM", [{"label": "b", "value": "meta::/x/btm.dat"}]),
+    ], store_metas)
+    assert len(items) == 1
+    assert items[0]["filename"] == "PT0001-H25C_3D.png"
+    assert {m["kind"] for m in items[0]["members"]} == {"TOP", "BTM"}
