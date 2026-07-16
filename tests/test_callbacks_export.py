@@ -156,9 +156,10 @@ def test_stem_for_key_unknown_passthrough():
 
 
 # --- _grouped_3d_items ------------------------------------------------------
-# Options whose key can't be resolved to a (sample, phase, temp) point (unknown
-# meta path / non-gap-named value) fall back to one single-surface image each
-# with the legacy {KIND}_{stem}_3D.png name — exercised with store_metas={}.
+# Each GAP/OUT dataset anchors one combined image (TOP + GAP + BTM); TOP/BTM
+# options with no matching gap (and gap-named options that fail to parse) fall
+# back to one single-surface {KIND}_{stem}_3D.png each — exercised with
+# store_metas={} when no gap is present.
 
 def test_grouped_3d_items_ungroupable_kind_prefix_in_filename():
     items = _grouped_3d_items(
@@ -214,43 +215,89 @@ def test_grouped_3d_items_label_falls_back_to_key():
     assert items[0]["members"][0]["label"] == "gap::g.txt"
 
 
-def test_grouped_3d_items_computed_gaps_same_point_combine():
-    # Two computed gaps sharing (top_no=3, C, 25) -> ONE combined image.
+def test_grouped_3d_items_each_gap_anchors_its_own_image():
+    # Two computed gaps of the same TOP (TOP3) -> ONE image PER gap, named the
+    # GAP way. No TOP/BTM options here, so each image is just the gap surface.
     items = _grouped_3d_items([("GAP", [
         {"label": "g8", "value": "gap::TEST-C25_TOP3-BTM8.txt"},
         {"label": "g9", "value": "gap::TEST-C25_TOP3-BTM9.txt"},
     ])], {})
-    assert len(items) == 1
-    assert items[0]["filename"] == "PT0003-C25C_3D.png"
+    assert [it["filename"] for it in items] == [
+        "GAP-C25-TOP3-BTM8.png", "GAP-C25-TOP3-BTM9.png"]
     assert [m["key"] for m in items[0]["members"]] == [
-        "gap::TEST-C25_TOP3-BTM8.txt", "gap::TEST-C25_TOP3-BTM9.txt"]
+        "gap::TEST-C25_TOP3-BTM8.txt"]
 
 
-def test_grouped_3d_items_different_points_stay_separate():
+def test_grouped_3d_items_gap_filename_uses_phase_and_temp():
     items = _grouped_3d_items([("GAP", [
         {"label": "h", "value": "gap::T-H25_TOP1-BTM2.txt"},
-        {"label": "c", "value": "gap::T-C25_TOP1-BTM2.txt"},
+        {"label": "c", "value": "gap::T-C240_TOP1-BTM2.txt"},
     ])], {})
     assert [it["filename"] for it in items] == [
-        "PT0001-H25C_3D.png", "PT0001-C25C_3D.png"]
+        "GAP-H25-TOP1-BTM2.png", "GAP-C240-TOP1-BTM2.png"]
 
 
-def _meta(kind, sample, temp, time_s, path):
-    return {"title": "T", "sample_no": sample, "time_s": time_s,
-            "temp_c": temp, "kind": kind, "path": path}
+def _meta(kind, sample, temp, time_s, path, **extra):
+    d = {"title": "T", "sample_no": sample, "time_s": time_s,
+         "temp_c": temp, "kind": kind, "path": path}
+    d.update(extra)
+    return d
 
 
-def test_grouped_3d_items_meta_same_point_combines_across_kinds():
-    # A TOP and a BTM at the same sample/temp/phase (single measurement each
-    # -> peak == itself -> phase 'H') combine into one PT0001-H25C image.
+def test_grouped_3d_items_gap_pulls_matching_top_and_btm():
+    # The user's case: TOP1 shared by two gaps -> two images, each TOP1 + its
+    # own GAP + the paired BTM. TOP1 appears in both (not lumped into one).
     store_metas = {
-        "TOP": [_meta("TOP", 1, 25, 100, "/x/top.dat")],
-        "BTM": [_meta("BTM", 1, 25, 100, "/x/btm.dat")],
+        "TOP": [_meta("TOP", 1, 25, 100, "/x/top1.dat")],
+        "BTM": [_meta("BTM", 1, 25, 100, "/x/btm1.dat"),
+                _meta("BTM", 2, 25, 100, "/x/btm2.dat")],
     }
     items = _grouped_3d_items([
-        ("TOP", [{"label": "t", "value": "meta::/x/top.dat"}]),
-        ("BTM", [{"label": "b", "value": "meta::/x/btm.dat"}]),
+        ("TOP", [{"label": "TOP1", "value": "meta::/x/top1.dat"}]),
+        ("BTM", [{"label": "BTM1", "value": "meta::/x/btm1.dat"},
+                 {"label": "BTM2", "value": "meta::/x/btm2.dat"}]),
+        ("GAP", [{"label": "g1", "value": "gap::T-H25_TOP1-BTM1.txt"},
+                 {"label": "g2", "value": "gap::T-H25_TOP1-BTM2.txt"}]),
+    ], store_metas)
+    assert [it["filename"] for it in items] == [
+        "GAP-H25-TOP1-BTM1.png", "GAP-H25-TOP1-BTM2.png"]
+    # image 1: TOP1 + GAP(TOP1-BTM1) + BTM1
+    assert [(m["kind"], m["key"]) for m in items[0]["members"]] == [
+        ("TOP", "meta::/x/top1.dat"),
+        ("GAP", "gap::T-H25_TOP1-BTM1.txt"),
+        ("BTM", "meta::/x/btm1.dat")]
+    # image 2 reuses TOP1, pairs BTM2 — no leftover single-surface fallbacks
+    assert [m["kind"] for m in items[1]["members"]] == ["TOP", "GAP", "BTM"]
+    assert len(items) == 2
+
+
+def test_grouped_3d_items_btm_matched_within_temp_tolerance():
+    # BTM temp (24) lags the gap/TOP temp (25) by <= TEMP_TOLERANCE_C -> matched.
+    store_metas = {
+        "TOP": [_meta("TOP", 1, 25, 100, "/x/top1.dat")],
+        "BTM": [_meta("BTM", 1, 24, 100, "/x/btm1.dat")],
+    }
+    items = _grouped_3d_items([
+        ("TOP", [{"label": "TOP1", "value": "meta::/x/top1.dat"}]),
+        ("BTM", [{"label": "BTM1", "value": "meta::/x/btm1.dat"}]),
+        ("GAP", [{"label": "g1", "value": "gap::T-H25_TOP1-BTM1.txt"}]),
     ], store_metas)
     assert len(items) == 1
-    assert items[0]["filename"] == "PT0001-H25C_3D.png"
-    assert {m["kind"] for m in items[0]["members"]} == {"TOP", "BTM"}
+    assert [m["kind"] for m in items[0]["members"]] == ["TOP", "GAP", "BTM"]
+
+
+def test_grouped_3d_items_unmatched_top_btm_fall_back_to_singletons():
+    # A gap for TOP1-BTM1, plus an orphan BTM9 with no gap -> BTM9 exports alone.
+    store_metas = {
+        "TOP": [_meta("TOP", 1, 25, 100, "/x/top1.dat")],
+        "BTM": [_meta("BTM", 1, 25, 100, "/x/btm1.dat"),
+                _meta("BTM", 9, 25, 100, "/x/btm9.dat")],
+    }
+    items = _grouped_3d_items([
+        ("TOP", [{"label": "TOP1", "value": "meta::/x/top1.dat"}]),
+        ("BTM", [{"label": "BTM1", "value": "meta::/x/btm1.dat"},
+                 {"label": "BTM9", "value": "meta::/x/btm9.dat"}]),
+        ("GAP", [{"label": "g1", "value": "gap::T-H25_TOP1-BTM1.txt"}]),
+    ], store_metas)
+    assert [it["filename"] for it in items] == [
+        "GAP-H25-TOP1-BTM1.png", "BTM_btm9_3D.png"]
