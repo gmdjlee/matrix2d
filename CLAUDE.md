@@ -197,27 +197,39 @@ charts.py stays Dash-free so it ports directly to the React migration.
   Agg draw releases the GIL) — worker count `MATRIX2D_EXPORT_WORKERS` (default
   4, clamp 1–8, capped at gap count). `_EXPORT["done"]` still counts completed
   GAPS.
-- "Save All Filtered Images" on the 3D View tab exports ONE COMPOSITE
-  multi-surface PNG per temperature point, `{H|C}{temp}_3D.png`
-  (`callbacks._composite_3d_groups` groups the dropdown OPTIONS by (phase,
-  temp) — meta:: keys via `helpers.phase_entries`, gap:: keys via
-  `parse_gap_name`; group order = `sort_phase_temps`, members TOP/BTM/GAP/OUT
-  then option order; options with no temperature point land in a "Skipped:"
-  note on the status line, capped at 8). Included kinds = the kinds that have
-  a dropdown SELECTION (all four when nothing is selected anywhere); every
-  filtered option of an included kind joins its group, selected or not.
-  z-offsets: a selected dataset keeps its own "height" input, unselected
-  members inherit the first selected offset of their kind (else 0.0), so all
-  composites stack alike. `data-show-resized == "resized"` pairs a group's
-  TOP/BTM surfaces onto the `gap-reference` grid via `resize_crop_blank`
-  (GAP/OUT untouched), mirroring `render_3d`; TOP/BTM transforms always apply.
-  Rendered by `charts_mpl.multi_surface_3d` with `opt3d` ChartOptions (title
-  defaults to `{H|C}{temp}`). Rendering goes through the shared parallel
-  matplotlib pool (`callbacks._pooled_figure_export`, also used by the Gap
-  batch export); destination = Image Export save folder (blank → OUT).
-  Background worker `_EXPORT3D` (progress counts GROUPS) + root-level
-  `export3d-all-progress-interval` poller, same polling contract.
-  `helpers._MATRIX_CACHE` and `repository._RAW_CACHE` are
+- "Save All Filtered Images" on the 3D View tab turns the filtered
+  TOP/BTM/GAP/OUT dropdown OPTIONS (not the selected values) into 3D PNGs via
+  `callbacks._grouped_3d_items`, pairing FIRST: each GAP/OUT dataset anchors ONE
+  image overlaying its own surface with the matching TOP (sample = TOP no) and
+  BTM (sample = BTM no) at the same phase/temperature — the same
+  `TOP + GAP + BTM` combination the chart shows for that pairing, so a TOP
+  shared by several gaps (TOP1-BTM1..4) yields one image per gap, not a lumped
+  overlay. `_gap_anchor` reads (top_no, btm_no, phase, temp) from the gap name
+  / meta; `_match_component` takes the TOP/BTM option at that point (exact temp,
+  else nearest within `pipeline.TEMP_TOLERANCE_C` — BTM temps may lag the TOP
+  temp the gap is named for). Named `{KIND}-{phase}{temp}-TOP{n}-BTM{m}.png`
+  (e.g. `GAP-H25-TOP1-BTM1.png`). TOP/BTM options no gap claimed then group by
+  temperature point into one COMPOSITE each, `{H|C}{temp}_3D.png` (order =
+  `sort_phase_temps`, members TOP before BTM then option order); anything still
+  unplaced (unparseable gap names, metas with no phase/temp) exports alone as
+  `{KIND}_{stem}_3D.png`. Nothing is skipped; `_2`/`_3` on duplicate names.
+  Included kinds = the kinds that have a dropdown SELECTION (all four when
+  nothing is selected anywhere); options of excluded kinds are ignored.
+  z-offsets: a dataset with its own "height" input keeps it, the rest inherit
+  the first selected offset of their kind (else 0.0), so every image stacks
+  alike. `data-show-resized == "resized"` pairs an image's TOP/BTM surfaces onto
+  the `gap-reference` grid via `resize_crop_blank` (GAP/OUT untouched),
+  mirroring `render_3d`; TOP/BTM transforms always apply. EVERY image (including
+  single-surface ones) renders through `charts_mpl.multi_surface_3d` with
+  `opt3d` ChartOptions — colorbar-mode included — title defaulting to the image
+  name. Rendering goes through the shared parallel matplotlib pool
+  (`callbacks._pooled_figure_export`, also used by the Gap batch export);
+  destination = Image Export save folder (blank → OUT). Background worker
+  `_EXPORT3D` (progress counts IMAGES) + root-level
+  `export3d-all-progress-interval` poller, same polling contract; per-member
+  problems in an otherwise fine image land in a "Skipped:" note on the status
+  line (capped at 8 via `_capped_join`). `helpers._MATRIX_CACHE` and
+  `repository._RAW_CACHE` are
   lock-guarded (`_MATRIX_LOCK` / `_RAW_CACHE_LOCK`) because these parallel
   workers resolve meta:: datasets through them concurrently (dict ops inside
   the lock; file loads outside, mirroring `helpers._GAP_LOCK`).

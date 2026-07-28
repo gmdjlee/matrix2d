@@ -446,12 +446,13 @@ def _tab_3d() -> html.Div:
         html.Div(id="export3d-status", className="status"),
         html.Button("Save All Filtered Images", id="btn-export-3d-all",
                     n_clicks=0, className="btn"),
-        html.Div("Saves one composite 3D PNG per temperature point (H/C + °C) "
-                 "among the filtered TOP/BTM/GAP/OUT datasets: kinds with a "
-                 "selection render together (all kinds when nothing is "
-                 "selected), with per-dataset z-offsets, the Data Options "
-                 "display mode and the 3D Chart Options applied. "
-                 "Files: H25_3D.png, C25_3D.png, ...",
+        html.Div("Saves one 3D PNG per filtered GAP/OUT dataset overlaying it "
+                 "with its matching TOP/BTM at that phase/temperature (±2°C, "
+                 "GAP-H25-TOP1-BTM1.png); TOP/BTM without a matching gap group "
+                 "into one composite per temperature point (H25_3D.png). Kinds "
+                 "with a selection take part (all when nothing is selected); "
+                 "per-dataset z-offsets, the Data Options display mode and the "
+                 "3D Chart Options apply.",
                  className="status"),
         # progress bar for the background 3D batch image export; polled by the
         # root-level export3d-all-progress-interval (same reasoning as the Gap
