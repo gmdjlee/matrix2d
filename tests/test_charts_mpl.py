@@ -28,6 +28,18 @@ def _series():
             {"label": "C25", "avg": 2.0, "std": None}]
 
 
+def _multi_items():
+    """Three surfaces with distinct value ranges, z offsets and a blank cell."""
+    return [("TOP PT0001 H240C (6×8)", _z() / 10.0, 0.0),
+            ("BTM PT0008 H240C (6×8)", _z() / 5.0 + 100.0, 40.0),
+            ("GAP TOP1-BTM8 (6×8)", _z() + 3.0, 90.0)]
+
+
+def _cbar_axes(fig):
+    """Colorbar axes of *fig* (everything that is not the 3D plot axes)."""
+    return [a for a in fig.axes if a.name != "3d"]
+
+
 # --- direct builders return a Figure ---------------------------------------
 
 def test_builders_return_figures():
@@ -133,3 +145,120 @@ def test_z_array_maps_none_to_nan():
     arr = charts_mpl._z_array([[1.0, None], [None, 4.0]])
     assert np.isnan(arr[0, 1]) and np.isnan(arr[1, 0])
     assert arr[0, 0] == 1.0 and arr[1, 1] == 4.0
+
+
+# --- multi-surface colorbar modes + slot layout ----------------------------
+
+def test_multi_surface_shared_has_one_colorbar_and_legend():
+    fig = charts_mpl.multi_surface_3d(_multi_items(),
+                                      charts_mpl.ChartOptions(title="M"))
+    # main 3D axes + exactly one shared colorbar
+    assert len(fig.axes) == 2
+    assert len(_cbar_axes(fig)) == 1
+    legend = fig.axes[0].get_legend()
+    assert legend is not None
+    names = [t.get_text() for t in legend.get_texts()]
+    assert names == [nm for nm, _v, _o in _multi_items()]
+    # the colorbar slot is added to the figure, not carved out of the plot
+    assert fig.get_size_inches()[0] > 7.0
+
+
+def test_multi_surface_per_item_colorbars_do_not_overlap():
+    # regression: fraction/pad colorbars used to pile up on one another
+    items = _multi_items()
+    fig = charts_mpl.multi_surface_3d(
+        items, charts_mpl.ChartOptions(shared_colorbar=False))
+    caxes = _cbar_axes(fig)
+    assert len(fig.axes) == 4 and len(caxes) == 3
+
+    boxes = sorted((a.get_position() for a in caxes), key=lambda b: b.x0)
+    for prev, nxt in zip(boxes, boxes[1:]):
+        assert prev.x1 <= nxt.x0 + 1e-9
+
+    labels = sorted(a.get_ylabel() for a in caxes)
+    assert labels == sorted(nm for nm, _v, _o in items)
+
+
+def test_multi_surface_explicit_width_is_not_grown():
+    fig = charts_mpl.multi_surface_3d(
+        _multi_items(),
+        charts_mpl.ChartOptions(shared_colorbar=False, width=900))
+    assert fig.get_size_inches()[0] == pytest.approx(9.0)
+
+
+def test_multi_surface_no_colorbar_keeps_default_width():
+    fig = charts_mpl.multi_surface_3d(
+        _multi_items(), charts_mpl.ChartOptions(show_colorbar=False))
+    assert _cbar_axes(fig) == []
+    assert fig.get_size_inches()[0] == pytest.approx(7.0)
+    assert fig.axes[0].get_legend() is not None  # names still identifiable
+
+
+def test_multi_surface_shared_all_nan_item(tmp_path):
+    fig = charts_mpl.multi_surface_3d(
+        [("dead", np.full((4, 5), np.nan), 0.0)], charts_mpl.ChartOptions())
+    p = os.path.join(str(tmp_path), "nan.png")
+    charts_mpl.save_figure(fig, p, {})
+    assert os.path.getsize(p) > 0
+
+
+# --- 3D tick parity (plotly scene dticks) ----------------------------------
+
+def test_style_ticks_3d_applies_tick_steps():
+    fig = charts_mpl.surface_3d(
+        _z(6, 8), charts_mpl.ChartOptions(x_tick_step=2, y_tick_step=3))
+    ax = fig.axes[0]
+
+    def visible(ticks, lim):
+        return [t for t in ticks if lim[0] <= t <= lim[1]]
+
+    xs = visible(ax.get_xticks(), ax.get_xlim())
+    ys = visible(ax.get_yticks(), ax.get_ylim())
+    assert len(xs) >= 2 and np.allclose(np.diff(xs), 2.0)
+    assert len(ys) >= 2 and np.allclose(np.diff(ys), 3.0)
+
+
+# --- reconstruction of multi-surface plotly figures ------------------------
+
+def test_reconstruct_shared_keeps_offset_surfaces_in_view(tmp_path):
+    # cmin/cmax span the RAW values in shared mode; using them as the z range
+    # clipped every offset surface out of the plot.
+    items = [("TOP", _z() / 20.0, 0.0), ("BTM", _z() / 20.0, 50.0)]
+    d = charts.multi_surface_3d(items, charts.ChartOptions(title="S")).to_dict()
+    fig = charts_mpl.figure_from_plotly_dict(d)
+
+    top = max(float(np.nanmax(v)) + off for _n, v, off in items)
+    assert fig.axes[0].get_zlim()[1] >= top - 1e-6
+    assert len(_cbar_axes(fig)) == 1
+    legend = fig.axes[0].get_legend()
+    assert [t.get_text() for t in legend.get_texts()] == ["TOP", "BTM"]
+
+    p = os.path.join(str(tmp_path), "shared.png")
+    charts_mpl.save_figure(fig, p, {})
+    assert os.path.getsize(p) > 0
+
+
+def test_reconstruct_shared_honours_scene_z_range():
+    items = [("TOP", _z() / 20.0, 0.0), ("BTM", _z() / 20.0, 50.0)]
+    d = charts.multi_surface_3d(
+        items, charts.ChartOptions(zmin=-5.0, zmax=60.0)).to_dict()
+    fig = charts_mpl.figure_from_plotly_dict(d)
+    assert fig.axes[0].get_zlim() == pytest.approx((-5.0, 60.0))
+
+
+def test_reconstruct_per_item_colorbars_do_not_overlap(tmp_path):
+    items = [("TOP", _z(), 0.0), ("BTM", _z() + 3, 5.0), ("GAP", _z() + 9, 10.0)]
+    d = charts.multi_surface_3d(
+        items, charts.ChartOptions(shared_colorbar=False)).to_dict()
+    fig = charts_mpl.figure_from_plotly_dict(d)
+
+    caxes = _cbar_axes(fig)
+    assert len(caxes) == len(items)
+    boxes = sorted((a.get_position() for a in caxes), key=lambda b: b.x0)
+    for prev, nxt in zip(boxes, boxes[1:]):
+        assert prev.x1 <= nxt.x0 + 1e-9
+    assert sorted(a.get_ylabel() for a in caxes) == ["BTM", "GAP", "TOP"]
+
+    p = os.path.join(str(tmp_path), "per.png")
+    charts_mpl.save_figure(fig, p, {})
+    assert os.path.getsize(p) > 0

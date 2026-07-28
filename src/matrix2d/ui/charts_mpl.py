@@ -15,6 +15,11 @@ Design notes / deliberate parity choices vs. plotly:
   blank-cell behaviour.
 * ``origin="lower"`` on 2D images so row 0 sits at the bottom, matching plotly
   heatmap/contour orientation.
+* Multi-surface figures lay their colorbars out in fixed-width slots down the
+  right edge (:func:`_slot_colorbars`) and GROW the figure to fit them, instead
+  of letting each ``fraction``/``pad`` colorbar steal width from the axes —
+  which crammed the bars and their vertical labels on top of one another as
+  soon as there were two surfaces.
 * ``ChartOptions`` is reused unchanged from :mod:`charts`; sizes given in pixels
   are converted to inches at ``_DPI``.
 """
@@ -23,7 +28,9 @@ from typing import List, Optional, Tuple
 
 import matplotlib
 import numpy as np
+from matplotlib import cm as mcm
 from matplotlib import colors as mcolors
+from matplotlib import patches as mpatches
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import MultipleLocator
@@ -43,6 +50,11 @@ _CMAP = {
 _DPI = 100
 _DEFAULT_2D_IN = (7.0, 6.0)
 _DEFAULT_3D_IN = (7.0, 6.0)
+
+# Figure inches reserved per colorbar in the slot layout: the slim bar itself
+# (_CBAR_BAR_IN) plus room for its tick labels and one vertical name label.
+_CBAR_SLOT_IN = 0.78
+_CBAR_BAR_IN = 0.14
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +135,23 @@ def _style_ticks_2d(ax, options: ChartOptions):
         ax.yaxis.set_major_locator(MultipleLocator(options.y_tick_step))
 
 
+def _style_ticks_3d(ax, options: ChartOptions):
+    """Tick styling for a 3D axes: dtick parity + label size/family.
+
+    Mirrors what :func:`charts._apply_layout` puts on the plotly scene axes:
+    x = columns, y = rows (z is left on autorange). Locators go on first so the
+    Text objects we hand the font family to are the final ones.
+    """
+    if options.x_tick_step is not None:
+        ax.xaxis.set_major_locator(MultipleLocator(options.x_tick_step))
+    if options.y_tick_step is not None:
+        ax.yaxis.set_major_locator(MultipleLocator(options.y_tick_step))
+    ax.tick_params(labelsize=options.tick_font_size)
+    for lbl in (ax.get_xticklabels() + ax.get_yticklabels()
+                + ax.get_zticklabels()):
+        lbl.set_fontfamily(options.font_family)
+
+
 def _colorbar(fig, ax, mappable, options: ChartOptions, label: str = ""):
     if not options.show_colorbar:
         return
@@ -131,6 +160,95 @@ def _colorbar(fig, ax, mappable, options: ChartOptions, label: str = ""):
     if label:
         cb.set_label(label, fontsize=options.font_size,
                      fontfamily=options.font_family)
+
+
+def _slot_colorbars(fig, ax, specs, options: ChartOptions):
+    """Place N colorbars in fixed-width slots along the right edge of *fig*.
+
+    ``specs`` is a list of ``(mappable, label)``; an empty label means no name
+    text (the single shared bar). Each slot is ``_CBAR_SLOT_IN`` figure inches
+    wide, so bars, tick labels and the vertical name label always clear one
+    another no matter how many surfaces there are.
+
+    When the caller did not pin ``options.width`` the figure GROWS by one slot
+    per colorbar, keeping the plot area at its normal size; with an explicit
+    width the slots are carved out of it instead (the axes shrinks).
+
+    The caller must NOT run ``fig.tight_layout()`` afterwards — it would
+    discard this placement.
+    """
+    n = len(specs)
+    w_in, h_in = fig.get_size_inches()
+    if options.width is None and n:
+        w_in = _DEFAULT_3D_IN[0] + n * _CBAR_SLOT_IN
+        fig.set_size_inches(w_in, h_in)
+
+    slot = _CBAR_SLOT_IN / float(w_in)          # slot width, figure fraction
+    # y0 low + tall box leaves headroom for the title; Axes3D draws its cube
+    # well inside the rect, so a full-bleed x span clips nothing.
+    ax.set_position([0.0, 0.02, max(0.15, 1.0 - n * slot), 0.88])
+
+    bar_w = _CBAR_BAR_IN / float(w_in)
+    for i, (mappable, label) in enumerate(specs):
+        x0 = 1.0 - (n - i) * slot + 0.1 * slot  # small gap between slots
+        cax = fig.add_axes([x0, 0.14, bar_w, 0.66])
+        cb = fig.colorbar(mappable, cax=cax)
+        cb.ax.tick_params(labelsize=options.tick_font_size)
+        if label:
+            cb.set_label(label, fontsize=options.font_size,
+                         fontfamily=options.font_family)
+
+
+def _color_bounds(arrays, lo, hi):
+    """Resolve color bounds: explicit *lo*/*hi* win, else the finite data range.
+
+    Falls back to 0..1 when nothing is finite and pads a degenerate (equal or
+    inverted) range so ``Normalize`` stays valid.
+    """
+    if lo is None or hi is None:
+        mins = []
+        maxs = []
+        for arr in arrays:
+            finite = arr[np.isfinite(arr)]
+            if finite.size:
+                mins.append(float(finite.min()))
+                maxs.append(float(finite.max()))
+        if lo is None:
+            lo = min(mins) if mins else 0.0
+        if hi is None:
+            hi = max(maxs) if maxs else 1.0
+    lo, hi = float(lo), float(hi)
+    if not hi > lo:
+        lo, hi = lo - 0.5, lo + 0.5
+    return lo, hi
+
+
+def _facecolors(arr, cmap, norm):
+    """(rows, cols, 4) RGBA for ``plot_surface(facecolors=...)``.
+
+    Colors come from the RAW values, so a vertical z offset cannot shift them.
+    Blank cells land on the colormap's transparent 'bad' color.
+    """
+    return cmap(norm(np.ma.masked_invalid(arr)))
+
+
+def _proxy_patch(name, arr, cmap, norm):
+    """Legend swatch for a shared-scale surface (colored by its mean value).
+
+    Shared mode has no per-surface colorbar to carry the dataset name, so the
+    names move to a proxy legend — plotly keeps them as legend entries.
+    """
+    if np.isfinite(arr).any():
+        color = cmap(norm(float(np.nanmean(arr))))
+    else:
+        color = "0.6"
+    return mpatches.Patch(facecolor=color, label=name)
+
+
+def _add_legend(ax, handles, options: ChartOptions):
+    if handles:
+        ax.legend(handles=handles, loc="upper left",
+                  fontsize=options.font_size, framealpha=0.7)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +332,6 @@ def surface_3d(values, options: ChartOptions, name: str = "",
     trace_name = _with_shape(name, arr) if options.show_shape else name
     title = trace_name or options.title
     _apply_title(ax, options, title)
-    ax.tick_params(labelsize=options.tick_font_size)
 
     if options.match_aspect:
         rows, cols = arr.shape
@@ -223,37 +340,67 @@ def surface_3d(values, options: ChartOptions, name: str = "",
     if options.zmin is not None and options.zmax is not None:
         ax.set_zlim(options.zmin, options.zmax)
     fig.tight_layout()
+    # after tight_layout: materialising 3D tick labels (which _style_ticks_3d
+    # must do to set their font) blows up the pre-projection bbox estimate and
+    # tight_layout then bails out with "margins cannot be made large enough".
+    _style_ticks_3d(ax, options)
     return fig
 
 
 def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]",
                      options: ChartOptions) -> Figure:
-    """Several surfaces in one 3D axes (one colorbar per trace)."""
+    """Several surfaces in one 3D axes.
+
+    ``options.shared_colorbar`` (default) puts every surface on ONE common
+    color scale spanning the RAW values of all items and draws a single
+    colorbar; colors come from ``facecolors`` so the vertical z offsets cannot
+    shift them, and the dataset names move to a proxy legend. With it False
+    each surface maps its own z and keeps its own name-labelled colorbar.
+
+    Either way the colorbars go through :func:`_slot_colorbars`, so they never
+    overlap and the figure widens to make room for them (unless the caller
+    pinned ``options.width``).
+    """
     fig = _new_figure(options, _DEFAULT_3D_IN)
     ax = fig.add_subplot(111, projection="3d")
-    zmin, zmax = options.zmin, options.zmax
+    arrays = [_as_2d_float(values) for _name, values, _offset in items]
+    max_rows = max([a.shape[0] for a in arrays] + [1])
+    max_cols = max([a.shape[1] for a in arrays] + [1])
 
-    max_rows = max_cols = 1
-    for name, values, z_offset in items:
-        arr = _as_2d_float(values)
-        max_rows = max(max_rows, arr.shape[0])
-        max_cols = max(max_cols, arr.shape[1])
-        surf = _plot_surface(ax, arr, z_offset, options, name)
-        if options.show_colorbar:
-            cb = fig.colorbar(surf, ax=ax, fraction=0.046, pad=0.04)
-            cb.ax.tick_params(labelsize=options.tick_font_size)
+    specs = []
+    if options.shared_colorbar:
+        cmap = _make_cmap(options)
+        norm = mcolors.Normalize(*_color_bounds(arrays, options.zmin,
+                                                options.zmax))
+        handles = []
+        for (name, _values, z_offset), arr in zip(items, arrays):
+            rows, cols = arr.shape
+            X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
+            ax.plot_surface(X, Y, arr + z_offset,
+                            facecolors=_facecolors(arr, cmap, norm),
+                            shade=False, linewidth=0, antialiased=True,
+                            rstride=1, cstride=1)
             if name:
-                cb.set_label(name, fontsize=options.font_size,
-                             fontfamily=options.font_family)
+                handles.append(_proxy_patch(name, arr, cmap, norm))
+        if options.show_colorbar:
+            sm = mcm.ScalarMappable(norm=norm, cmap=cmap)
+            sm.set_array([])
+            specs.append((sm, ""))       # one bar for every surface -> no name
+        _add_legend(ax, handles, options)
+    else:
+        for (name, _values, z_offset), arr in zip(items, arrays):
+            surf = _plot_surface(ax, arr, z_offset, options, name)
+            if options.show_colorbar:
+                specs.append((surf, name))
 
     _apply_title(ax, options, options.title)
-    ax.tick_params(labelsize=options.tick_font_size)
     if options.match_aspect:
         m = float(max(max_rows, max_cols, 1))
         ax.set_box_aspect((max_cols / m, max_rows / m, 0.6))
-    if zmin is not None and zmax is not None:
-        ax.set_zlim(zmin, zmax)
-    fig.tight_layout()
+    if options.zmin is not None and options.zmax is not None:
+        ax.set_zlim(options.zmin, options.zmax)
+    _style_ticks_3d(ax, options)
+    _slot_colorbars(fig, ax, specs, options)   # no tight_layout after this
     return fig
 
 
@@ -385,38 +532,75 @@ def _recon_2d(trace: dict, opts: ChartOptions, typ: str) -> Figure:
     return fig
 
 
-def _recon_surface(traces: "List[dict]", opts: ChartOptions) -> Figure:
+def _scene_zrange(layout: dict):
+    """``layout.scene.zaxis.range`` as a (lo, hi) pair, or None if unset.
+
+    :mod:`charts` only writes it when the user pinned BOTH zmin and zmax, so
+    its absence means "autorange" — the surfaces' own extent decides.
+    """
+    scene = (layout or {}).get("scene") or {}
+    rng = (scene.get("zaxis") or {}).get("range")
+    if rng is None or len(rng) != 2 or rng[0] is None or rng[1] is None:
+        return None
+    return float(rng[0]), float(rng[1])
+
+
+def _recon_surface(traces: "List[dict]", opts: ChartOptions,
+                   layout: dict) -> Figure:
+    """Rebuild a (multi-)surface scene from plotly trace dicts.
+
+    A trace carrying ``surfacecolor`` comes from a shared-colorbar figure: it
+    is colored by those raw values over its own cmin/cmax, never by z (which
+    holds the stacking offset). Traces without it keep the z-mapped colormap.
+
+    The z-axis range is read from ``layout.scene.zaxis`` — NOT from cmin/cmax,
+    which in shared mode span the raw values and would clip offset surfaces.
+    """
     fig = _new_figure(opts, _DEFAULT_3D_IN)
     ax = fig.add_subplot(111, projection="3d")
     max_rows = max_cols = 1
-    zmin = zmax = None
+    n_bars = sum(1 for tr in traces if tr.get("showscale", True))
+    specs = []
+    handles = []
     for tr in traces:
         arr = _z_array(tr["z"])
         max_rows = max(max_rows, arr.shape[0])
         max_cols = max(max_cols, arr.shape[1])
         cmap = _cmap_from_stops(tr.get("colorscale"), tr.get("reversescale", False))
-        zmin, zmax = tr.get("cmin"), tr.get("cmax")
+        cmin, cmax = tr.get("cmin"), tr.get("cmax")
         rows, cols = arr.shape
         X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
-        surf = ax.plot_surface(X, Y, arr, cmap=cmap, vmin=zmin, vmax=zmax,
-                               linewidth=0, antialiased=True,
-                               rstride=1, cstride=1)
+        name = tr.get("name") or ""
+        scolor = tr.get("surfacecolor")
+        if scolor is not None:
+            cvals = _z_array(scolor)
+            norm = mcolors.Normalize(*_color_bounds([cvals], cmin, cmax))
+            ax.plot_surface(X, Y, arr, facecolors=_facecolors(cvals, cmap, norm),
+                            shade=False, linewidth=0, antialiased=True,
+                            rstride=1, cstride=1)
+            mappable = mcm.ScalarMappable(norm=norm, cmap=cmap)
+            mappable.set_array([])
+            if name:
+                handles.append(_proxy_patch(name, cvals, cmap, norm))
+        else:
+            mappable = ax.plot_surface(X, Y, arr, cmap=cmap, vmin=cmin,
+                                       vmax=cmax, linewidth=0,
+                                       antialiased=True, rstride=1, cstride=1)
         if tr.get("showscale", True):
-            cb = fig.colorbar(surf, ax=ax, fraction=0.046, pad=0.04)
-            cb.ax.tick_params(labelsize=opts.tick_font_size)
-            nm = tr.get("name")
-            if nm:
-                cb.set_label(nm, fontsize=opts.font_size,
-                             fontfamily=opts.font_family)
+            # a lone bar describes the whole figure, so it stays unlabelled
+            specs.append((mappable, name if n_bars > 1 else ""))
+
     # single-surface figures carry their label in the trace name (title empty)
     title = opts.title or (traces[0].get("name") if len(traces) == 1 else "")
     _apply_title(ax, opts, title)
-    ax.tick_params(labelsize=opts.tick_font_size)
+    _add_legend(ax, handles, opts)
     m = float(max(max_rows, max_cols, 1))
     ax.set_box_aspect((max_cols / m, max_rows / m, 0.6))
-    if zmin is not None and zmax is not None:
-        ax.set_zlim(zmin, zmax)
-    fig.tight_layout()
+    zrange = _scene_zrange(layout)
+    if zrange is not None:
+        ax.set_zlim(*zrange)
+    _style_ticks_3d(ax, opts)
+    _slot_colorbars(fig, ax, specs, opts)      # no tight_layout after this
     return fig
 
 
@@ -437,7 +621,8 @@ def figure_from_plotly_dict(d: dict) -> Figure:
 
     Dispatches on the first trace's ``type`` (contour/heatmap/surface/scatter)
     — the exact types produced by :mod:`charts`. Colors come from the dict's
-    resolved colorscale stops, so the PNG matches the displayed figure. Raises
+    resolved colorscale stops, so the PNG matches the displayed figure. Surface
+    figures also need the layout (scene z range), so it is passed along. Raises
     ValueError on an empty or unrecognised figure.
     """
     data = (d or {}).get("data") or []
@@ -448,7 +633,7 @@ def figure_from_plotly_dict(d: dict) -> Figure:
     if typ in ("contour", "heatmap"):
         return _recon_2d(data[0], opts, typ)
     if typ == "surface":
-        return _recon_surface(data, opts)
+        return _recon_surface(data, opts, (d.get("layout") or {}))
     if typ == "scatter":
         return _recon_scatter(data[0], opts)
     raise ValueError("unsupported trace type: {0!r}".format(typ))

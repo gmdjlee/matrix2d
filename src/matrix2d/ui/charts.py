@@ -27,6 +27,11 @@ class ChartOptions:
     When ``match_aspect`` is True the chart is sized to the data shape: 2D axes
     get equal cell scaling (square cells), and the 3D scene x/y aspect follows
     cols:rows.
+
+    ``shared_colorbar`` only affects multi-surface figures
+    (:func:`multi_surface_3d`). When True every surface is colored by its RAW
+    data values on one common scale and a single colorbar is shown; when False
+    each surface maps its own z (values + offset) and keeps its own colorbar.
     """
 
     title: str = ""
@@ -38,6 +43,7 @@ class ChartOptions:
     colorscale: str = "Jet"
     reverse_colorscale: bool = False
     show_colorbar: bool = True
+    shared_colorbar: bool = True
     zmin: Optional[float] = None
     zmax: Optional[float] = None
     tick_font_size: int = 10
@@ -290,9 +296,15 @@ def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: Char
     """Several go.Surface traces in one scene.
 
     ``items`` is a list of ``(name, values, z_offset)``. Each surface uses its
-    own z (values + offset). Per-trace colorbars are positioned along the right
-    edge so they do not overlap, and legend entries are enabled so surfaces can
-    be toggled independently.
+    own z (values + offset) and legend entries are enabled so surfaces can be
+    toggled independently.
+
+    ``options.shared_colorbar`` (default) puts every surface on ONE common
+    color scale spanning the raw data values of all items and shows a single
+    colorbar. Colors come from ``surfacecolor`` (the raw values) so the
+    vertical z offsets cannot shift them. With it False each surface maps its
+    own z and keeps its own colorbar, positioned along the right edge so they
+    do not overlap.
 
     ``options.zmin``/``zmax`` map the color range (cmin/cmax). When BOTH bounds
     are set they also fix the scene z-axis range ``[zmin, zmax]``; a single
@@ -301,36 +313,67 @@ def multi_surface_3d(items: "List[Tuple[str, np.ndarray, float]]", options: Char
     fig = go.Figure()
     n = len(items)
     zmin, zmax = _z_bounds(options)
+    tick_font = dict(size=options.tick_font_size, family=options.font_family)
+    arrays = [_as_2d_float(values) for _name, values, _offset in items]
+
+    lo, hi = zmin, zmax
+    if options.shared_colorbar:
+        # bounds come from the RAW values (never the offset z) so stacking the
+        # surfaces apart cannot change the shared color mapping.
+        finite = [a[np.isfinite(a)] for a in arrays]
+        finite = [f for f in finite if f.size > 0]
+        if lo is None and finite:
+            lo = float(min(float(f.min()) for f in finite))
+        if hi is None and finite:
+            hi = float(max(float(f.max()) for f in finite))
 
     max_rows = 1
     max_cols = 1
-    for i, item in enumerate(items):
-        name, values, z_offset = item
-        arr = _as_2d_float(values)
+    for i, arr in enumerate(arrays):
+        name, _values, z_offset = items[i]
         max_rows = max(max_rows, arr.shape[0])
         max_cols = max(max_cols, arr.shape[1])
         z = arr + z_offset
 
-        surface = go.Surface(
-            z=z,
-            colorscale=options.colorscale,
-            reversescale=options.reverse_colorscale,
-            name=name,
-            showlegend=True,
-            showscale=options.show_colorbar,
-            cmin=zmin,
-            cmax=zmax,
-        )
-        if options.show_colorbar and n > 0:
-            # spread colorbars horizontally across the right side so they do
-            # not stack on top of one another.
-            x_pos = 1.02 + (i * 0.08)
-            surface.colorbar = dict(
-                title=dict(text=name, side="right"),
-                x=x_pos,
-                len=max(0.3, 1.0 / max(n, 1)),
-                thickness=12,
+        if options.shared_colorbar:
+            first = i == 0
+            surface = go.Surface(
+                z=z,
+                surfacecolor=arr,
+                colorscale=options.colorscale,
+                reversescale=options.reverse_colorscale,
+                name=name,
+                showlegend=True,
+                showscale=bool(options.show_colorbar and first),
+                cmin=lo,
+                cmax=hi,
             )
+            if options.show_colorbar and first:
+                # the one visible colorbar: default position/size, no per-name
+                # title (it describes every surface, not just the first).
+                surface.colorbar = dict(tickfont=tick_font)
+        else:
+            surface = go.Surface(
+                z=z,
+                colorscale=options.colorscale,
+                reversescale=options.reverse_colorscale,
+                name=name,
+                showlegend=True,
+                showscale=options.show_colorbar,
+                cmin=zmin,
+                cmax=zmax,
+            )
+            if options.show_colorbar:
+                # spread colorbars horizontally across the right side so they
+                # do not stack on top of one another.
+                x_pos = 1.02 + (i * 0.08)
+                surface.colorbar = dict(
+                    title=dict(text=name, side="right"),
+                    x=x_pos,
+                    len=max(0.3, 1.0 / max(n, 1)),
+                    thickness=12,
+                    tickfont=tick_font,
+                )
         fig.add_trace(surface)
 
     fig = _apply_layout(fig, options, is_3d=True)
