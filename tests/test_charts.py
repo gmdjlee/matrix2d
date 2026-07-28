@@ -265,6 +265,95 @@ def test_multi_surface_names_and_legend():
 
 
 # ---------------------------------------------------------------------------
+# multi_surface_3d colorbar modes (shared scale vs. per item)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def multi_items():
+    """Three datasets with distinct value ranges, offsets and one NaN cell."""
+    a = np.array([[0.0, 1.0], [2.0, 3.0]])
+    b = np.array([[10.0, 11.0], [np.nan, 13.0]])
+    c = np.array([[-5.0, -4.0], [-3.0, -2.0]])
+    return [("a", a, 1.0), ("b", b, 20.0), ("c", c, -7.0)]
+
+
+def test_shared_colorbar_is_the_default():
+    assert ChartOptions().shared_colorbar is True
+
+
+def test_multi_surface_shared_shows_single_colorbar(multi_items):
+    fig = multi_surface_3d(multi_items, ChartOptions())
+    assert sum(1 for tr in fig.data if tr.showscale) == 1
+    assert fig.data[0].showscale is True
+
+
+def test_multi_surface_shared_colors_by_raw_values(multi_items):
+    fig = multi_surface_3d(multi_items, ChartOptions())
+    for tr, (_name, arr, offset) in zip(fig.data, multi_items):
+        # color source is the raw array; the z offset must not shift it
+        np.testing.assert_allclose(np.asarray(tr.surfacecolor, dtype="float64"),
+                                   arr, equal_nan=True)
+        np.testing.assert_allclose(np.asarray(tr.z, dtype="float64"),
+                                   arr + offset, equal_nan=True)
+
+
+def test_multi_surface_shared_bounds_are_global_raw_minmax(multi_items):
+    fig = multi_surface_3d(multi_items, ChartOptions())
+    for tr in fig.data:
+        assert tr.cmin == -5.0    # min over all items, NaN ignored
+        assert tr.cmax == 13.0
+
+
+def test_multi_surface_shared_explicit_bounds_win(multi_items):
+    fig = multi_surface_3d(multi_items, ChartOptions(zmin=-1.0, zmax=4.0))
+    for tr in fig.data:
+        assert tr.cmin == -1.0
+        assert tr.cmax == 4.0
+
+
+def test_multi_surface_shared_colorbar_hidden(multi_items):
+    fig = multi_surface_3d(multi_items, ChartOptions(show_colorbar=False))
+    assert not any(tr.showscale for tr in fig.data)
+
+
+def test_multi_surface_shared_colorbar_tickfont(multi_items):
+    opts = ChartOptions(tick_font_size=7, font_family="Courier New")
+    fig = multi_surface_3d(multi_items, opts)
+    cb = fig.data[0].colorbar
+    assert cb.tickfont.size == 7
+    assert cb.tickfont.family == "Courier New"
+    # single shared scale -> no per-dataset colorbar title
+    assert cb.title.text is None
+
+
+def test_multi_surface_shared_all_nan_leaves_bounds_auto():
+    nan_items = [("a", np.full((2, 2), np.nan), 0.0)]
+    fig = multi_surface_3d(nan_items, ChartOptions())
+    assert fig.data[0].cmin is None
+    assert fig.data[0].cmax is None
+
+
+def test_multi_surface_per_item_mode(multi_items):
+    fig = multi_surface_3d(multi_items, ChartOptions(shared_colorbar=False))
+    assert all(tr.showscale for tr in fig.data)
+    # per-item colorbars map z directly (no surfacecolor override)
+    assert all(tr.surfacecolor is None for tr in fig.data)
+    assert all(tr.cmin is None and tr.cmax is None for tr in fig.data)
+    xs = [tr.colorbar.x for tr in fig.data]
+    assert all(b > a for a, b in zip(xs, xs[1:]))
+    assert [tr.colorbar.title.text for tr in fig.data] == ["a", "b", "c"]
+
+
+def test_multi_surface_per_item_colorbar_tickfont(multi_items):
+    opts = ChartOptions(shared_colorbar=False, tick_font_size=8,
+                        font_family="Times New Roman")
+    fig = multi_surface_3d(multi_items, opts)
+    for tr in fig.data:
+        assert tr.colorbar.tickfont.size == 8
+        assert tr.colorbar.tickfont.family == "Times New Roman"
+
+
+# ---------------------------------------------------------------------------
 # effective_gap_chart — black/grey publication styling
 # ---------------------------------------------------------------------------
 

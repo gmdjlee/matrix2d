@@ -199,6 +199,7 @@ _OPTION_ROWS = [
     ("tick-size",),
     ("x-dtick", "y-dtick"),
     ("colorscale",),
+    ("colorbar-mode",),
     ("toggles",),
     ("zmin", "zmax"),
     ("contour-levels",),
@@ -214,8 +215,10 @@ _COMMON_FIELDS = {"title", "font-family", "font-size", "title-size",
 # Color-mapped 2D charts (contour + heatmap): full color + contour controls.
 _2D_FIELDS = _COMMON_FIELDS | {"x-dtick", "y-dtick", "colorscale", "toggles",
                                "zmin", "zmax", "contour-levels"}
-# 3D surface: same as 2D minus contour levels (surfaces are not contoured).
-_3D_FIELDS = _2D_FIELDS - {"contour-levels"}
+# 3D surface: same as 2D minus contour levels (surfaces are not contoured),
+# plus the shared/per-item colorbar choice (only multi-surface figures have
+# more than one colorbar to reconcile).
+_3D_FIELDS = (_2D_FIELDS - {"contour-levels"}) | {"colorbar-mode"}
 # Line chart (Effective Gap): no colorscale/contour/aspect; zmin/zmax act as
 # the y-axis range, y-dtick as its tick step.
 _LINE_FIELDS = _COMMON_FIELDS | {"y-dtick", "zmin", "zmax"}
@@ -237,6 +240,7 @@ _OPTION_LABELS = {
     "x-dtick": "X dtick",
     "y-dtick": "Y dtick",
     "colorscale": "Colorscale",
+    "colorbar-mode": "Colorbar",
     "toggles": None,
     "zmin": "zmin",
     "zmax": "zmax",
@@ -289,6 +293,12 @@ def _option_control(cid, key: str):
         return dcc.Dropdown(id=c, options=[{"label": s, "value": s}
                                            for s in COLORSCALES],
                             value="Jet", clearable=False)
+    if key == "colorbar-mode":
+        return dcc.Dropdown(
+            id=c,
+            options=[{"label": "Shared scale (single)", "value": "shared"},
+                     {"label": "Per item", "value": "per-item"}],
+            value="shared", clearable=False)
     if key == "toggles":
         return dcc.Checklist(
             id=c,
@@ -436,8 +446,12 @@ def _tab_3d() -> html.Div:
         html.Div(id="export3d-status", className="status"),
         html.Button("Save All Filtered Images", id="btn-export-3d-all",
                     n_clicks=0, className="btn"),
-        html.Div("Saves one 3D surface PNG per dataset listed in the filtered "
-                 "TOP/BTM/GAP/OUT dropdowns (options, not selections).",
+        html.Div("Saves one composite 3D PNG per temperature point (H/C + °C) "
+                 "among the filtered TOP/BTM/GAP/OUT datasets: kinds with a "
+                 "selection render together (all kinds when nothing is "
+                 "selected), with per-dataset z-offsets, the Data Options "
+                 "display mode and the 3D Chart Options applied. "
+                 "Files: H25_3D.png, C25_3D.png, ...",
                  className="status"),
         # progress bar for the background 3D batch image export; polled by the
         # root-level export3d-all-progress-interval (same reasoning as the Gap

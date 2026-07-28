@@ -131,7 +131,12 @@ charts.py stays Dash-free so it ports directly to the React migration.
   tab's panel shows (`callbacks.toggle_chart_options` keyed on `tabs`). Each
   tab renders ONLY the fields its chart type uses, selected by
   `layout.TAB_OPTION_FIELDS` (laid out via `_OPTION_ROWS`): 2D/Gap show the
-  full color+contour set; 3D (surface) drops `contour-levels`; Effective Gap
+  full color+contour set; 3D (surface) drops `contour-levels` and adds
+  `colorbar-mode` — "Shared scale (single)" (default) colors every surface by
+  RAW values on one common scale with a single colorbar (on-screen 3D chart
+  AND every 3D PNG path), "Per item" restores per-surface colorbars, laid out
+  in non-overlapping slots in matplotlib exports (the figure widens per bar
+  unless an explicit width is set); Effective Gap
   (line) drops colorscale/toggles/contour-levels/x-dtick and relabels
   zmin/zmax as the y-axis range. Each render callback derives its Input/State
   list from `layout.tab_option_suffixes(prefix)` (`_option_inputs` /
@@ -192,15 +197,27 @@ charts.py stays Dash-free so it ports directly to the React migration.
   Agg draw releases the GIL) — worker count `MATRIX2D_EXPORT_WORKERS` (default
   4, clamp 1–8, capped at gap count). `_EXPORT["done"]` still counts completed
   GAPS.
-- "Save All Filtered Images" on the 3D View tab exports `{KIND}_{stem}_3D.png`
-  per dataset option currently listed in the filtered TOP/BTM/GAP/OUT dropdowns
-  (dropdown OPTIONS, not the selected values; `_2`/`_3` on duplicate stems),
-  one 3D surface each with `opt3d` ChartOptions + TOP/BTM transforms applied
-  (no resize pairing). Rendering goes through the shared parallel matplotlib
-  pool (`callbacks._pooled_figure_export`, also used by the Gap batch export);
-  destination = Image Export save folder (blank → OUT). Background worker
-  `_EXPORT3D` + root-level `export3d-all-progress-interval` poller, same
-  polling contract. `helpers._MATRIX_CACHE` and `repository._RAW_CACHE` are
+- "Save All Filtered Images" on the 3D View tab exports ONE COMPOSITE
+  multi-surface PNG per temperature point, `{H|C}{temp}_3D.png`
+  (`callbacks._composite_3d_groups` groups the dropdown OPTIONS by (phase,
+  temp) — meta:: keys via `helpers.phase_entries`, gap:: keys via
+  `parse_gap_name`; group order = `sort_phase_temps`, members TOP/BTM/GAP/OUT
+  then option order; options with no temperature point land in a "Skipped:"
+  note on the status line, capped at 8). Included kinds = the kinds that have
+  a dropdown SELECTION (all four when nothing is selected anywhere); every
+  filtered option of an included kind joins its group, selected or not.
+  z-offsets: a selected dataset keeps its own "height" input, unselected
+  members inherit the first selected offset of their kind (else 0.0), so all
+  composites stack alike. `data-show-resized == "resized"` pairs a group's
+  TOP/BTM surfaces onto the `gap-reference` grid via `resize_crop_blank`
+  (GAP/OUT untouched), mirroring `render_3d`; TOP/BTM transforms always apply.
+  Rendered by `charts_mpl.multi_surface_3d` with `opt3d` ChartOptions (title
+  defaults to `{H|C}{temp}`). Rendering goes through the shared parallel
+  matplotlib pool (`callbacks._pooled_figure_export`, also used by the Gap
+  batch export); destination = Image Export save folder (blank → OUT).
+  Background worker `_EXPORT3D` (progress counts GROUPS) + root-level
+  `export3d-all-progress-interval` poller, same polling contract.
+  `helpers._MATRIX_CACHE` and `repository._RAW_CACHE` are
   lock-guarded (`_MATRIX_LOCK` / `_RAW_CACHE_LOCK`) because these parallel
   workers resolve meta:: datasets through them concurrently (dict ops inside
   the lock; file loads outside, mirroring `helpers._GAP_LOCK`).

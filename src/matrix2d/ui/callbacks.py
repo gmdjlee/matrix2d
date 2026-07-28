@@ -75,7 +75,8 @@ _EXPORT = {
 # Background 3D-tab batch-image-export state, same pattern as _EXPORT above.
 # The 3D "Save All Filtered Images" button starts a worker thread; a
 # dcc.Interval polls this dict to drive the progress bar and publish the final
-# status string. "done"/"total" count datasets (one 3D surface PNG each).
+# status string. "done"/"total" count temperature-point groups (one composite
+# multi-surface PNG each).
 _EXPORT3D_LOCK = threading.Lock()
 _EXPORT3D = {
     "running": False,
@@ -165,6 +166,7 @@ def _build_options(prefix, values) -> charts.ChartOptions:
         colorscale=d.get("colorscale") or "Jet",
         reverse_colorscale="reverse" in toggles,
         show_colorbar="colorbar" in toggles,
+        shared_colorbar=(d.get("colorbar-mode") or "shared") == "shared",
         show_shape="shape" in toggles,
         match_aspect="aspect" in toggles,
         zmin=_float(d.get("zmin")),
@@ -303,43 +305,6 @@ def _gap_key(out_name: str) -> str:
     return "gap::" + out_name
 
 
-def _stem_for_key(key):
-    """Source-file stem for a 3D dataset key ('gap::name' / 'meta::path')."""
-    if key.startswith("gap::"):
-        return os.path.splitext(key[len("gap::"):])[0]
-    if key.startswith("meta::"):
-        return os.path.splitext(os.path.basename(key[len("meta::"):]))[0]
-    return key
-
-
-def _filtered_3d_items(options_by_kind):
-    """Export work list from the 3D tab's (filtered) dataset dropdown options.
-
-    ``options_by_kind``: list of ``(kind, options)`` where options are the
-    dropdown option dicts ({"label", "value"}). Returns a list of
-    ``{"key", "label", "filename"}`` — filename is
-    ``{KIND}_{source-file-stem}_3D.png`` (kind prefix disambiguates
-    same-named files across folders); duplicates get ``_2``, ``_3``, ...
-    """
-    used = set()
-    items = []
-    for kind, options in options_by_kind:
-        for o in options or []:
-            key = o.get("value")
-            label = o.get("label") or key
-            if not key:
-                continue
-            base = "{0}_{1}_3D".format(kind, _stem_for_key(key))
-            name = base
-            n = 2
-            while name in used:
-                name = "{0}_{1}".format(base, n)
-                n += 1
-            used.add(name)
-            items.append({"key": key, "label": label, "filename": name + ".png"})
-    return items
-
-
 def _all_meta_dicts(store_metas) -> List[dict]:
     out = []
     for kind in ("TOP", "BTM", "GAP", "OUT"):
@@ -447,6 +412,158 @@ def _phase_label(entry: dict) -> str:
         temp=entry["temp_c"],
         time=entry["time_s"],
     )
+
+
+# ---------------------------------------------------------------------------
+# 3D composite batch export: group the (filter-narrowed) dataset dropdown
+# OPTIONS into one multi-surface figure per temperature point. Pure functions
+# (no I/O, no Dash objects) so they unit-test directly.
+# ---------------------------------------------------------------------------
+
+_KIND_ORDER = ("TOP", "BTM", "GAP", "OUT")
+
+
+def _selections_by_kind(options_by_kind, selections):
+    """Normalize the selection argument to ``{kind: [key, ...]}``.
+
+    Accepts a dict keyed by kind, a list of ``(kind, values)`` pairs, or a
+    plain list of value lists positionally matching ``options_by_kind``.
+    """
+    kinds = [kind for kind, _opts in options_by_kind]
+    out = {k: [] for k in kinds}
+    if isinstance(selections, dict):
+        for kind in kinds:
+            out[kind] = list(selections.get(kind) or [])
+        return out
+    for kind, entry in zip(kinds, selections or []):
+        # tolerate (kind, values) pairs; dataset keys never look like a kind
+        if (isinstance(entry, (list, tuple)) and len(entry) == 2
+                and entry[0] in _KIND_ORDER
+                and (entry[1] is None or isinstance(entry[1], (list, tuple)))):
+            kind, entry = entry[0], entry[1]
+        out[kind] = list(entry or [])
+    return out
+
+
+def _phase_temp_by_path(store_metas, kind):
+    """{file path: (phase, temp_c)} for one scanned folder's metas.
+
+    GAP/OUT metas carry an explicit phase; TOP/BTM derive it from the sample's
+    peak time — ``helpers.phase_entries`` handles both.
+    """
+    out = {}
+    for e in helpers.phase_entries(_kind_metas(store_metas, kind)):
+        path = (e.get("meta") or {}).get("path")
+        if path:
+            out[path] = (e["phase"], e["temp_c"])
+    return out
+
+
+def _offset_map(offset_values, offset_ids):
+    """{dataset key: z offset} from the pattern-matched offset inputs."""
+    out = {}
+    for oid, oval in zip(offset_ids or [], offset_values or []):
+        key = oid.get("key") if isinstance(oid, dict) else None
+        if not key:
+            continue
+        try:
+            out[key] = float(oval) if oval is not None else 0.0
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    return out
+
+
+def _composite_3d_groups(options_by_kind, selections_by_kind, store_metas,
+                         offset_values, offset_ids):
+    """Group the 3D tab's dataset options into one composite export per point.
+
+    ``options_by_kind``: ``[(kind, dropdown_options), ...]`` in TOP/BTM/GAP/OUT
+    order (option dicts with "label"/"value"). ``selections_by_kind``: the same
+    kinds mapped to the dropdown VALUES. ``offset_values``/``offset_ids``: the
+    pattern-matched z-offset inputs (ids are ``{"type", "key"}`` dicts).
+
+    Only kinds that have at least one SELECTED dataset take part; when nothing
+    is selected anywhere, all four kinds do. Every option of an included kind
+    joins the group of its (phase, temperature) point, whether or not it is
+    itself selected — the selection picks the kinds, the filter picks the rows.
+
+    Offsets: a member that has its own configured offset keeps it; the rest
+    inherit their kind's offset (the first selected key of that kind that has
+    one, else 0.0) so every composite stacks the surfaces the same way.
+
+    Returns ``(groups, skipped)`` — groups are
+    ``{"phase", "temp", "filename", "members"}`` ordered by
+    :func:`helpers.sort_phase_temps` (heating ascending, then cooling
+    descending), members ``{"key", "kind", "label", "offset"}`` in
+    TOP/BTM/GAP/OUT then option order; ``skipped`` holds the labels of options
+    whose temperature point could not be determined.
+    """
+    selections = _selections_by_kind(options_by_kind, selections_by_kind)
+    kinds = [kind for kind, _opts in options_by_kind]
+    selected_kinds = [k for k in kinds if selections.get(k)]
+    included = set(selected_kinds) if selected_kinds else set(kinds)
+
+    offsets = _offset_map(offset_values, offset_ids)
+    kind_offset = {}
+    for kind in kinds:
+        kind_offset[kind] = next(
+            (offsets[k] for k in selections.get(kind) or [] if k in offsets),
+            0.0)
+
+    by_point = {}
+    skipped = []
+    for kind, options in options_by_kind:
+        if kind not in included:
+            continue  # excluded kinds are ignored, not reported as skipped
+        by_path = None  # built lazily: phase_entries is O(folder)
+        for o in options or []:
+            key = (o or {}).get("value")
+            if not key:
+                continue
+            label = (o or {}).get("label") or key
+            point = None
+            if key.startswith("gap::"):
+                parsed = helpers.parse_gap_name(key[len("gap::"):])
+                if parsed:
+                    point = (parsed["phase"], parsed["temp_c"])
+            elif key.startswith("meta::"):
+                if by_path is None:
+                    by_path = _phase_temp_by_path(store_metas, kind)
+                point = by_path.get(key[len("meta::"):])
+            if point is None:
+                skipped.append(label)
+                continue
+            by_point.setdefault(point, []).append({
+                "key": key,
+                "kind": kind,
+                "label": label,
+                "offset": offsets.get(key, kind_offset.get(kind, 0.0)),
+            })
+
+    def _kind_rank(member):
+        kind = member["kind"]
+        return (_KIND_ORDER.index(kind) if kind in _KIND_ORDER
+                else len(_KIND_ORDER))
+
+    groups = []
+    for phase, temp in helpers.sort_phase_temps(list(by_point.keys())):
+        members = sorted(by_point[(phase, temp)], key=_kind_rank)  # stable
+        groups.append({
+            "phase": phase,
+            "temp": temp,
+            "filename": "{0}{1}_3D.png".format(phase, temp),
+            "members": members,
+        })
+    return groups, skipped
+
+
+def _capped_join(messages, limit=8, sep="; "):
+    """Join messages for a UI status string, bounded to ``limit`` entries."""
+    messages = list(messages)
+    text = sep.join(messages[:limit])
+    if len(messages) > limit:
+        text += " …"
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +706,118 @@ def _pooled_figure_export(items, build_figs, out_dir, img_kwargs, on_progress):
 
     return (counters["saved"],
             [m for _, m in sorted(failed, key=lambda x: x[0])])
+
+
+def _export_3d_all_worker(groups, pre_skipped, store_metas, out_dir, opts,
+                          img_kwargs, top_cfg, btm_cfg, show_resized,
+                          reference):
+    """Export one composite multi-surface 3D PNG per temperature point.
+
+    ``groups`` are the :func:`_composite_3d_groups` dicts
+    (phase/temp/filename/members); every member renders as one surface in a
+    single 3D axes, with its own z offset, the Data Options display mode and
+    the opt3d ChartOptions applied. ``pre_skipped`` are option labels the
+    grouping could not place (reported in the final status).
+    Runs on the shared parallel matplotlib pool, same as the Gap batch export.
+    Module-level (like :func:`_pooled_figure_export`) — it needs no Dash app.
+    """
+    total = len(groups)
+    with _EXPORT3D_LOCK:
+        _EXPORT3D["total"] = total
+    logger.info("3D composite image export started: %d group(s) -> %r "
+                "(show_resized=%s, reference=%s)",
+                total, out_dir, show_resized, reference)
+    # Partial problems (one member of an otherwise fine group) are collected
+    # from the parallel render workers, so they are lock-guarded like the
+    # pool's own counters. A group that loses ALL of its members instead fails
+    # through _pooled_figure_export and lands in the "Failed:" list.
+    notes_lock = threading.Lock()
+    partial_notes = []
+
+    def _note(group, label, reason):
+        with notes_lock:
+            partial_notes.append("{0}: {1} ({2})".format(
+                group["filename"], label, reason))
+
+    try:
+        def _build_figs(group):
+            """(figs, err) for one group: a single composite (filename, figure)."""
+            records = []
+            for member in group["members"]:
+                try:
+                    values = _resolve_values(member["key"], store_metas,
+                                             top_cfg, btm_cfg)
+                except ValueError as exc:  # zero cell out of bounds / blank
+                    _note(group, member["label"], exc)
+                    continue
+                if values is None:
+                    _note(group, member["label"], "not loadable")
+                    continue
+                record = dict(member)
+                record["values"] = values
+                records.append(record)
+            if not records:
+                return [], "no loadable datasets"
+
+            # Same resize preview as render_3d: bring the group's TOP/BTM
+            # surfaces onto one reference grid (GAP/OUT are shown as-is).
+            if show_resized == "resized":
+                from matrix2d.core.resize import resize_crop_blank
+
+                inputs = [r for r in records if r["kind"] in ("TOP", "BTM")]
+                if len(inputs) >= 2:
+                    ref = _pick_reference_record(inputs, reference)
+                    for r in inputs:
+                        if r is ref:
+                            continue
+                        try:
+                            r["values"] = resize_crop_blank(
+                                r["values"], ref["values"].shape)
+                        except ValueError as exc:
+                            _note(group, r["label"],
+                                  "resize: {0}".format(exc))
+
+            items3d = []
+            for r in records:
+                label = r["label"]
+                if opts.show_shape:
+                    # multi_surface_3d takes prebuilt names, so the shape
+                    # suffix is folded into the label here (as render_3d does).
+                    label = "{0} ({1}×{2})".format(
+                        label, r["values"].shape[0], r["values"].shape[1])
+                items3d.append((label, r["values"], r["offset"]))
+            fig_opts = dataclasses.replace(
+                opts, title=opts.title or "{0}{1}".format(group["phase"],
+                                                          group["temp"]))
+            return [(group["filename"],
+                     charts_mpl.multi_surface_3d(items3d, fig_opts))], None
+
+        def _on_progress(done):
+            with _EXPORT3D_LOCK:
+                _EXPORT3D["done"] = done
+
+        pairs = [("{0}{1}".format(g["phase"], g["temp"]), g) for g in groups]
+        saved, failed_msgs = _pooled_figure_export(
+            pairs, _build_figs, out_dir, img_kwargs, _on_progress)
+
+        msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
+        logger.info("3D composite image export finished: %d saved, %d failed "
+                    "-> %s", saved, len(failed_msgs), out_dir)
+        if failed_msgs:
+            msg += " Failed: " + ", ".join(failed_msgs)
+        with notes_lock:
+            notes = list(pre_skipped or []) + list(partial_notes)
+        if notes:
+            msg += " Skipped: " + _capped_join(notes)
+        with _EXPORT3D_LOCK:
+            _EXPORT3D["result"] = msg
+    except Exception:  # noqa: BLE001 - never lose the outcome
+        logger.exception("3D composite image export worker crashed")
+        with _EXPORT3D_LOCK:
+            _EXPORT3D["error"] = traceback.format_exc(limit=3)
+    finally:
+        with _EXPORT3D_LOCK:
+            _EXPORT3D["running"] = False
 
 
 def register_callbacks(app):
@@ -1725,59 +1954,6 @@ def register_callbacks(app):
             with _EXPORT_LOCK:
                 _EXPORT["running"] = False
 
-    def _export_3d_all_worker(items, store_metas, out_dir, opts, img_kwargs,
-                              top_cfg, btm_cfg):
-        """Export one 3D surface PNG per filtered 3D-tab dataset option.
-
-        ``items`` are the ``_filtered_3d_items`` dicts (key/label/filename).
-        Runs on the shared parallel matplotlib pool, same as the Gap batch export.
-        """
-        total = len(items)
-        with _EXPORT3D_LOCK:
-            _EXPORT3D["total"] = total
-        logger.info("3D batch image export started: %d dataset(s) -> %r",
-                    total, out_dir)
-        try:
-            def _build_figs(item):
-                """(figs, err) for one dataset: a single (filename, figure)."""
-                try:
-                    values = _resolve_values(item["key"], store_metas,
-                                             top_cfg, btm_cfg)
-                except ValueError as exc:  # zero cell out of bounds / blank
-                    return [], str(exc)
-                if values is None:
-                    return [], "not loadable"
-                # surface_3d folds the rows×cols suffix into the trace name /
-                # title itself when opts.show_shape, so don't pre-append it.
-                fig_opts = dataclasses.replace(
-                    opts, title=opts.title or item["label"])
-                return [(item["filename"],
-                         charts_mpl.surface_3d(values, fig_opts,
-                                               name=item["label"]))], None
-
-            def _on_progress(done):
-                with _EXPORT3D_LOCK:
-                    _EXPORT3D["done"] = done
-
-            pairs = [(it["label"], it) for it in items]
-            saved, failed_msgs = _pooled_figure_export(
-                pairs, _build_figs, out_dir, img_kwargs, _on_progress)
-
-            msg = "Saved {0} image(s) to {1}.".format(saved, out_dir)
-            logger.info("3D batch image export finished: %d saved, %d failed "
-                        "-> %s", saved, len(failed_msgs), out_dir)
-            if failed_msgs:
-                msg += " Failed: " + ", ".join(failed_msgs)
-            with _EXPORT3D_LOCK:
-                _EXPORT3D["result"] = msg
-        except Exception:  # noqa: BLE001 - never lose the outcome
-            logger.exception("3D batch image export worker crashed")
-            with _EXPORT3D_LOCK:
-                _EXPORT3D["error"] = traceback.format_exc(limit=3)
-        finally:
-            with _EXPORT3D_LOCK:
-                _EXPORT3D["running"] = False
-
     @app.callback(
         Output("export-all-progress-interval", "disabled"),
         Output("btn-export-all-gaps", "disabled"),
@@ -1869,11 +2045,15 @@ def register_callbacks(app):
         return (result, True, False, {"width": "100%"},
                 "{0} / {0} gaps — done".format(total))
 
-    # 5c. 3D-tab batch export: one 3D surface PNG per dataset currently listed
-    #    in the (filter-narrowed) TOP/BTM/GAP/OUT dropdowns (options, not the
-    #    selected values). Runs in a background thread on the shared matplotlib
-    #    pool; the root-level export3d-all-progress-interval polls _EXPORT3D
-    #    (same polling contract as the Gap batch export above).
+    # 5c. 3D-tab batch export: one COMPOSITE multi-surface PNG per temperature
+    #    point ({H|C}{temp}_3D.png) over the datasets currently listed in the
+    #    (filter-narrowed) TOP/BTM/GAP/OUT dropdowns. The dropdown SELECTIONS
+    #    pick which kinds take part (all four when nothing is selected) and
+    #    supply the per-dataset z offsets; the Data Options display mode /
+    #    reference and the opt3d ChartOptions apply exactly as on screen. Runs
+    #    in a background thread on the shared matplotlib pool; the root-level
+    #    export3d-all-progress-interval polls _EXPORT3D (same polling contract
+    #    as the Gap batch export above).
     @app.callback(
         Output("export3d-all-progress-interval", "disabled"),
         Output("btn-export-3d-all", "disabled"),
@@ -1885,6 +2065,14 @@ def register_callbacks(app):
          State("view3d-btm", "options"),
          State("view3d-gap", "options"),
          State("view3d-out", "options"),
+         State("view3d-top", "value"),
+         State("view3d-btm", "value"),
+         State("view3d-gap", "value"),
+         State("view3d-out", "value"),
+         State("data-show-resized", "value"),
+         State("gap-reference", "value"),
+         State({"type": "z-offset", "key": ALL}, "value"),
+         State({"type": "z-offset", "key": ALL}, "id"),
          State("store-metas", "data"),
          State("folder-img", "value"),
          State("folder-out", "value"),
@@ -1895,16 +2083,24 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def start_export_3d_all(_n, top_opts, btm_opts, gap_opts, out_opts,
+                            top_keys, btm_keys, gap_keys, out_keys,
+                            show_resized, reference, offset_values, offset_ids,
                             store_metas, img_dir, out_dir, img_w, img_h,
                             img_scale, *rest):
         option_values = rest[:_N3D]
         transform_values = rest[_N3D:]
-        items = _filtered_3d_items([("TOP", top_opts), ("BTM", btm_opts),
-                                    ("GAP", gap_opts), ("OUT", out_opts)])
-        if not items:
-            return (True, False,
-                    "No datasets match the current filter — scan folders "
-                    "(or compute gaps) first.", {"width": "0%"}, "")
+        groups, skipped = _composite_3d_groups(
+            [("TOP", top_opts), ("BTM", btm_opts),
+             ("GAP", gap_opts), ("OUT", out_opts)],
+            {"TOP": top_keys, "BTM": btm_keys,
+             "GAP": gap_keys, "OUT": out_keys},
+            store_metas, offset_values, offset_ids)
+        if not groups:
+            msg = ("No datasets match the current filter — scan folders "
+                   "(or compute gaps) first.")
+            if skipped:
+                msg += " ({0} without a temperature point)".format(len(skipped))
+            return (True, False, msg, {"width": "0%"}, "")
         dest = _export_dir(img_dir, out_dir)
         if not dest:
             return (True, False,
@@ -1921,7 +2117,8 @@ def register_callbacks(app):
                              result=None, error=None)
         threading.Thread(
             target=_export_3d_all_worker,
-            args=(items, store_metas, dest, opts, img_kwargs, top_cfg, btm_cfg),
+            args=(groups, skipped, store_metas, dest, opts, img_kwargs,
+                  top_cfg, btm_cfg, show_resized, reference),
             name="export-3d-all-worker",
             daemon=True,
         ).start()
@@ -1944,7 +2141,7 @@ def register_callbacks(app):
 
         pct = (100.0 * done / total) if total else 0.0
         bar = {"width": "{0:.0f}%".format(pct)}
-        label = ("{0} / {1} datasets".format(done, total) if total
+        label = ("{0} / {1} images".format(done, total) if total
                  else "Exporting...")
 
         if running:
@@ -1961,4 +2158,4 @@ def register_callbacks(app):
             return no_update, True, False, no_update, no_update
         logger.info("3D export-all poll: publishing result to UI")
         return (result, True, False, {"width": "100%"},
-                "{0} / {0} datasets — done".format(total))
+                "{0} / {0} images — done".format(total))

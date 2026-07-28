@@ -6,13 +6,18 @@ defines callback factories), so the helpers can be exercised in isolation.
 Run with:  python -m pytest tests/test_callbacks_export.py
 """
 
+import os
+
 import numpy as np
 
+from matrix2d.ui import charts, helpers, layout
 from matrix2d.ui.callbacks import (
+    _EXPORT3D,
+    _build_options,
+    _composite_3d_groups,
     _downsample_for_export,
+    _export_3d_all_worker,
     _export_image_kwargs,
-    _filtered_3d_items,
-    _stem_for_key,
 )
 
 
@@ -140,72 +145,302 @@ def test_downsample_non_square_within_cap_unchanged():
     assert _downsample_for_export(a, 8) is a
 
 
-# --- _stem_for_key ----------------------------------------------------------
+# --- _composite_3d_groups ---------------------------------------------------
+#
+# Fixtures: one TOP and one BTM sample measured at 25C -> 240C -> 25C, so the
+# peak-time phase rule tags the first 25C reading H and the last one C. OUT
+# metas carry an explicit phase (gap output naming), like a scanned OUT folder.
 
-def test_stem_for_key_gap_strips_extension():
-    assert _stem_for_key("gap::TEST-C25_TOP3-BTM8.txt") == "TEST-C25_TOP3-BTM8"
-
-
-def test_stem_for_key_meta_windows_path_basename_stem():
-    key = "meta::C:\\data\\TOP\\part_PT0001_00192s(240C).dat"
-    assert _stem_for_key(key) == "part_PT0001_00192s(240C)"
-
-
-def test_stem_for_key_unknown_passthrough():
-    assert _stem_for_key("weird-key") == "weird-key"
-
-
-# --- _filtered_3d_items -----------------------------------------------------
-
-def test_filtered_3d_items_kind_prefix_in_filename():
-    items = _filtered_3d_items(
-        [("TOP", [{"label": "top a", "value": "meta::/x/a.dat"}])])
-    assert len(items) == 1
-    assert items[0]["filename"] == "TOP_a_3D.png"
-    assert items[0]["key"] == "meta::/x/a.dat"
-    assert items[0]["label"] == "top a"
+def _input_meta(kind, sample_no, time_s, temp_c):
+    return {"title": "part", "sample_no": sample_no, "time_s": time_s,
+            "temp_c": temp_c, "kind": kind,
+            "path": "/{0}/PT{1:04d}_{2:05d}s({3}C).dat".format(
+                kind, sample_no, time_s, temp_c),
+            "btm_no": None, "phase": None}
 
 
-def test_filtered_3d_items_order_preserved_across_kinds():
-    items = _filtered_3d_items([
-        ("TOP", [{"label": "t", "value": "meta::/x/t.dat"}]),
-        ("BTM", [{"label": "b", "value": "meta::/x/b.dat"}]),
-        ("GAP", [{"label": "g", "value": "gap::g.txt"}]),
-        ("OUT", [{"label": "o", "value": "meta::/x/o.dat"}]),
-    ])
-    assert [it["filename"] for it in items] == [
-        "TOP_t_3D.png", "BTM_b_3D.png", "GAP_g_3D.png", "OUT_o_3D.png"]
+def _out_meta(top_no, btm_no, phase, temp_c):
+    name = "PFX-{0}{1}_TOP{2}-BTM{3}.txt".format(phase, temp_c, top_no, btm_no)
+    return {"title": "PFX", "sample_no": top_no, "time_s": 0,
+            "temp_c": temp_c, "kind": "GAP", "path": "/OUT/" + name,
+            "btm_no": btm_no, "phase": phase}
 
 
-def test_filtered_3d_items_duplicate_stems_get_numeric_suffix():
-    # same kind + same stem across two folders -> _2 on the second
-    items = _filtered_3d_items([("TOP", [
-        {"label": "a", "value": "meta::/x/a.dat"},
-        {"label": "a2", "value": "meta::/y/a.dat"},
-        {"label": "a3", "value": "meta::/z/a.dat"},
-    ])])
-    assert [it["filename"] for it in items] == [
-        "TOP_a_3D.png", "TOP_a_3D_2.png", "TOP_a_3D_3.png"]
+_TOP_METAS = [_input_meta("TOP", 1, 0, 25), _input_meta("TOP", 1, 100, 240),
+              _input_meta("TOP", 1, 200, 25)]
+_BTM_METAS = [_input_meta("BTM", 2, 0, 25), _input_meta("BTM", 2, 100, 240),
+              _input_meta("BTM", 2, 200, 25)]
+_OUT_METAS = [_out_meta(1, 2, "H", 25), _out_meta(1, 2, "C", 25)]
+
+_STORE_METAS = {"TOP": _TOP_METAS, "BTM": _BTM_METAS,
+                "GAP": [], "OUT": _OUT_METAS}
 
 
-def test_filtered_3d_items_none_and_empty_options_skipped():
-    items = _filtered_3d_items([
-        ("TOP", None),
-        ("BTM", []),
-        ("GAP", [{"label": "g", "value": "gap::g.txt"}]),
-    ])
-    assert [it["filename"] for it in items] == ["GAP_g_3D.png"]
+def _opt(meta):
+    return {"label": meta["kind"] + " " + meta["path"],
+            "value": "meta::" + meta["path"]}
 
 
-def test_filtered_3d_items_option_missing_value_skipped():
-    items = _filtered_3d_items([("TOP", [
-        {"label": "no value"},
-        {"label": "ok", "value": "meta::/x/ok.dat"},
-    ])])
-    assert [it["filename"] for it in items] == ["TOP_ok_3D.png"]
+def _options_by_kind(top=None, btm=None, gap=None, out=None):
+    return [("TOP", top or []), ("BTM", btm or []),
+            ("GAP", gap or []), ("OUT", out or [])]
 
 
-def test_filtered_3d_items_label_falls_back_to_key():
-    items = _filtered_3d_items(
-        [("GAP", [{"value": "gap::g.txt"}])])
-    assert items[0]["label"] == "gap::g.txt"
+def _all_options():
+    return _options_by_kind(
+        top=[_opt(m) for m in _TOP_METAS],
+        btm=[_opt(m) for m in _BTM_METAS],
+        gap=[{"label": "GAP PFX-H240_TOP1-BTM2.txt",
+              "value": "gap::PFX-H240_TOP1-BTM2.txt"}],
+        out=[_opt(m) for m in _OUT_METAS])
+
+
+def test_composite_groups_by_phase_and_temp_across_kinds():
+    groups, skipped = _composite_3d_groups(
+        _all_options(), {}, _STORE_METAS, [], [])
+    assert skipped == []
+    assert [g["filename"] for g in groups] == [
+        "H25_3D.png", "H240_3D.png", "C25_3D.png"]
+    by_name = {g["filename"]: g for g in groups}
+    # H25: TOP t=0, BTM t=0, OUT H25
+    assert [m["kind"] for m in by_name["H25_3D.png"]["members"]] == [
+        "TOP", "BTM", "OUT"]
+    # H240: TOP t=100, BTM t=100 and the gap:: option (parsed from its name)
+    h240 = by_name["H240_3D.png"]["members"]
+    assert [m["kind"] for m in h240] == ["TOP", "BTM", "GAP"]
+    assert h240[2]["key"] == "gap::PFX-H240_TOP1-BTM2.txt"
+    assert by_name["C25_3D.png"]["phase"] == "C"
+    assert by_name["C25_3D.png"]["temp"] == 25
+
+
+def test_composite_groups_members_ordered_top_btm_gap_out():
+    # options handed over in a scrambled kind order still come back TOP-first
+    scrambled = [("OUT", [_opt(_OUT_METAS[0])]),
+                 ("GAP", [{"label": "g", "value": "gap::PFX-H25_TOP1-BTM2.txt"}]),
+                 ("BTM", [_opt(_BTM_METAS[0])]),
+                 ("TOP", [_opt(_TOP_METAS[0])])]
+    groups, _skipped = _composite_3d_groups(scrambled, {}, _STORE_METAS, [], [])
+    assert len(groups) == 1
+    assert [m["kind"] for m in groups[0]["members"]] == [
+        "TOP", "BTM", "GAP", "OUT"]
+
+
+def test_composite_groups_selection_picks_which_kinds_take_part():
+    selections = {"TOP": ["meta::" + _TOP_METAS[0]["path"]],
+                  "BTM": ["meta::" + _BTM_METAS[0]["path"]],
+                  "GAP": [], "OUT": None}
+    groups, skipped = _composite_3d_groups(
+        _all_options(), selections, _STORE_METAS, [], [])
+    assert skipped == []   # excluded kinds are ignored, not "skipped"
+    kinds = {m["kind"] for g in groups for m in g["members"]}
+    assert kinds == {"TOP", "BTM"}
+
+
+def test_composite_groups_no_selection_anywhere_includes_all_kinds():
+    for selections in ({}, {"TOP": [], "BTM": None, "GAP": [], "OUT": []},
+                       [[], None, [], []]):
+        groups, _skipped = _composite_3d_groups(
+            _all_options(), selections, _STORE_METAS, [], [])
+        kinds = {m["kind"] for g in groups for m in g["members"]}
+        assert kinds == {"TOP", "BTM", "GAP", "OUT"}
+
+
+def test_composite_groups_offsets_selected_own_unselected_inherit():
+    sel_top = "meta::" + _TOP_METAS[0]["path"]      # H25 TOP, offset 5.0
+    other_top = "meta::" + _TOP_METAS[1]["path"]    # H240 TOP, not selected
+    sel_btm = "meta::" + _BTM_METAS[0]["path"]      # H25 BTM, offset 1.5
+    other_btm = "meta::" + _BTM_METAS[1]["path"]    # H240 BTM, not selected
+    ids = [{"type": "z-offset", "key": sel_top},
+           {"type": "z-offset", "key": sel_btm},
+           {"type": "z-offset", "key": other_top}]
+    values = [5.0, 1.5, -2.0]
+    groups, _skipped = _composite_3d_groups(
+        _all_options(),
+        {"TOP": [sel_top], "BTM": [sel_btm]},
+        _STORE_METAS, values, ids)
+    offsets = {m["key"]: m["offset"] for g in groups for m in g["members"]}
+    assert offsets[sel_top] == 5.0        # selected -> own value
+    assert offsets[sel_btm] == 1.5
+    assert offsets[other_top] == -2.0     # has its own input -> keeps it
+    assert offsets[other_btm] == 1.5      # inherits BTM's first selected offset
+
+
+def test_composite_groups_offset_defaults_zero_without_selection_or_value():
+    # nothing selected anywhere -> every kind's default offset is 0.0
+    groups, _skipped = _composite_3d_groups(
+        _all_options(), {}, _STORE_METAS, [], [])
+    assert all(m["offset"] == 0.0 for g in groups for m in g["members"])
+
+
+def test_composite_groups_none_offset_value_is_zero():
+    sel_top = "meta::" + _TOP_METAS[0]["path"]
+    other_top = "meta::" + _TOP_METAS[1]["path"]
+    groups, _skipped = _composite_3d_groups(
+        _options_by_kind(top=[_opt(m) for m in _TOP_METAS]),
+        {"TOP": [sel_top]}, _STORE_METAS,
+        [None], [{"type": "z-offset", "key": sel_top}])
+    offsets = {m["key"]: m["offset"] for g in groups for m in g["members"]}
+    assert offsets[sel_top] == 0.0
+    assert offsets[other_top] == 0.0      # inherits the 0.0 kind default
+
+
+def test_composite_groups_order_heating_up_then_cooling_down():
+    metas = [_input_meta("TOP", 1, t, c) for t, c in
+             ((0, 25), (100, 150), (200, 240), (300, 150), (400, 25))]
+    store = {"TOP": metas}
+    groups, _skipped = _composite_3d_groups(
+        _options_by_kind(top=[_opt(m) for m in metas]), {}, store, [], [])
+    assert [g["filename"] for g in groups] == [
+        "H25_3D.png", "H150_3D.png", "H240_3D.png",
+        "C150_3D.png", "C25_3D.png"]
+
+
+def test_composite_groups_unparseable_gap_name_skipped_by_label():
+    groups, skipped = _composite_3d_groups(
+        _options_by_kind(gap=[
+            {"label": "GAP junk.txt", "value": "gap::junk.txt"},
+            {"label": "GAP ok", "value": "gap::PFX-H25_TOP1-BTM2.txt"},
+        ]), {}, _STORE_METAS, [], [])
+    assert skipped == ["GAP junk.txt"]
+    assert [g["filename"] for g in groups] == ["H25_3D.png"]
+
+
+def test_composite_groups_meta_key_absent_from_store_skipped():
+    groups, skipped = _composite_3d_groups(
+        _options_by_kind(top=[{"label": "ghost", "value": "meta::/TOP/gone.dat"}]),
+        {}, _STORE_METAS, [], [])
+    assert groups == []
+    assert skipped == ["ghost"]
+
+
+def test_composite_groups_option_without_value_ignored():
+    groups, skipped = _composite_3d_groups(
+        _options_by_kind(top=[{"label": "no value"}, _opt(_TOP_METAS[0])]),
+        {}, _STORE_METAS, [], [])
+    assert skipped == []
+    assert [g["filename"] for g in groups] == ["H25_3D.png"]
+    assert len(groups[0]["members"]) == 1
+
+
+# --- _export_3d_all_worker (end-to-end, no Dash) ----------------------------
+
+def test_export_3d_all_worker_writes_one_png_per_group(tmp_path):
+    names = ["PFX-H25_TOP1-BTM2.txt", "PFX-C40_TOP1-BTM2.txt"]
+    for i, name in enumerate(names):
+        path = tmp_path / name
+        np.savetxt(str(path), np.arange(9.0).reshape(3, 3) + i, delimiter="\t")
+        helpers.register_gap(name, str(path))
+    groups, skipped = _composite_3d_groups(
+        [("GAP", [{"label": "GAP " + n, "value": "gap::" + n} for n in names])],
+        {}, {}, [], [])
+    assert [g["filename"] for g in groups] == ["H25_3D.png", "C40_3D.png"]
+    assert skipped == []
+
+    try:
+        _export_3d_all_worker(groups, [], {}, str(tmp_path),
+                              charts.ChartOptions(), {}, None, None,
+                              "original", "AUTO")
+        for group in groups:
+            out = tmp_path / group["filename"]
+            assert out.exists()
+            assert out.stat().st_size > 0
+        assert _EXPORT3D["result"].startswith("Saved 2 image(s)")
+        assert _EXPORT3D["running"] is False
+        assert _EXPORT3D["error"] is None
+        assert _EXPORT3D["total"] == 2 and _EXPORT3D["done"] == 2
+    finally:
+        helpers.clear_gaps()
+        _EXPORT3D.update(running=False, done=0, total=0,
+                         result=None, error=None)
+
+
+def test_export_3d_all_worker_composites_meta_datasets_resized(tmp_path):
+    # TOP 9x9 + BTM 4x6 in one group: "resized" must bring the non-reference
+    # side onto the reference grid instead of failing on the shape mismatch.
+    metas = {"TOP": [], "BTM": []}
+    for kind, shape in (("TOP", (9, 9)), ("BTM", (4, 6))):
+        for time_s, temp_c in ((0, 25), (100, 240)):
+            path = tmp_path / "{0}_PT0001_{1:05d}s({2}C).dat".format(
+                kind, time_s, temp_c)
+            np.savetxt(str(path), np.ones(shape), delimiter="\t")
+            metas[kind].append(
+                {"title": "part", "sample_no": 1 if kind == "TOP" else 2,
+                 "time_s": time_s, "temp_c": temp_c, "kind": kind,
+                 "path": str(path), "btm_no": None, "phase": None})
+
+    def _o(m):
+        return {"label": m["kind"] + str(m["temp_c"]),
+                "value": "meta::" + m["path"]}
+
+    groups, skipped = _composite_3d_groups(
+        [("TOP", [_o(m) for m in metas["TOP"]]),
+         ("BTM", [_o(m) for m in metas["BTM"]])],
+        {}, metas, [], [])
+    assert [g["filename"] for g in groups] == ["H25_3D.png", "H240_3D.png"]
+    assert all(len(g["members"]) == 2 for g in groups)  # TOP + BTM per point
+
+    dest = tmp_path / "png"
+    try:
+        _export_3d_all_worker(groups, skipped, metas, str(dest),
+                              charts.ChartOptions(), {}, None, None,
+                              "resized", "AUTO")
+        assert _EXPORT3D["result"].startswith("Saved 2 image(s)")
+        assert "Failed:" not in _EXPORT3D["result"]
+        assert "Skipped:" not in _EXPORT3D["result"]
+        assert sorted(os.listdir(str(dest))) == ["H240_3D.png", "H25_3D.png"]
+    finally:
+        _EXPORT3D.update(running=False, done=0, total=0,
+                         result=None, error=None)
+
+
+def test_export_3d_all_worker_reports_skips_and_failures(tmp_path):
+    groups, _skipped = _composite_3d_groups(
+        [("GAP", [{"label": "GAP missing",
+                   "value": "gap::PFX-H25_TOP1-BTM2.txt"}])],
+        {}, {}, [], [])
+    try:
+        _export_3d_all_worker(groups, ["opt without a temperature point"], {},
+                              str(tmp_path), charts.ChartOptions(), {},
+                              None, None, "original", "AUTO")
+        msg = _EXPORT3D["result"]
+        assert msg.startswith("Saved 0 image(s)")
+        assert "Failed: H25 (no loadable datasets)" in msg
+        assert "Skipped: opt without a temperature point" in msg
+        assert not os.listdir(str(tmp_path))
+        assert _EXPORT3D["running"] is False
+    finally:
+        helpers.clear_gaps()
+        _EXPORT3D.update(running=False, done=0, total=0,
+                         result=None, error=None)
+
+
+# --- colorbar-mode control wiring (_build_options round-trip) ---------------
+
+def _opt_values(prefix, overrides=None):
+    """Positional control values for one tab; unset fields default to None."""
+    overrides = overrides or {}
+    return [overrides.get(k) for k in layout.tab_option_suffixes(prefix)]
+
+
+def test_colorbar_mode_only_rendered_on_3d_tab():
+    assert "colorbar-mode" in layout.tab_option_suffixes("opt3d")
+    for prefix in ("opt2d", "optgap", "opteff"):
+        assert "colorbar-mode" not in layout.tab_option_suffixes(prefix)
+
+
+def test_build_options_colorbar_mode_per_item():
+    opts = _build_options("opt3d", _opt_values("opt3d",
+                                               {"colorbar-mode": "per-item"}))
+    assert opts.shared_colorbar is False
+
+
+def test_build_options_colorbar_mode_shared():
+    opts = _build_options("opt3d", _opt_values("opt3d",
+                                               {"colorbar-mode": "shared"}))
+    assert opts.shared_colorbar is True
+
+
+def test_build_options_colorbar_mode_missing_defaults_to_shared():
+    # control present but empty (None), and tabs that never render it
+    assert _build_options("opt3d", _opt_values("opt3d")).shared_colorbar is True
+    assert _build_options("opt2d", _opt_values("opt2d")).shared_colorbar is True
